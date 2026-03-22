@@ -213,8 +213,8 @@ async function loadGpuTelemetry() {
   } catch (error) {
     state.gpuTelemetry = {
       supported: false,
-      label: "GPU activity",
-      note: "GPU telemetry is temporarily unavailable.",
+      label: "ECG Window",
+      note: "ECG Window is temporarily unavailable.",
       current_percent: 0,
       history: [],
     };
@@ -372,8 +372,8 @@ function renderGpuTelemetry() {
     return;
   }
 
-  const label = String(telemetry.label || "GPU activity").trim() || "GPU activity";
-  const note = String(telemetry.note || "Shows the busiest local GPU engine.").trim();
+  const label = String(telemetry.label || "ECG Window").trim() || "ECG Window";
+  const note = String(telemetry.note || "ECG-style view of the busiest local GPU engine.").trim();
   const currentPercent = clampPercent(telemetry.current_percent);
   const history = normalizeGpuHistory(telemetry.history, currentPercent);
 

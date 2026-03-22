@@ -326,11 +326,12 @@ fn expressive_runtime_status(runtime_dir: &Path) -> BackendRuntimeStatus {
 fn initial_gpu_telemetry() -> GpuTelemetrySnapshot {
     GpuTelemetrySnapshot {
         supported: cfg!(target_os = "windows"),
-        label: "GPU activity".to_string(),
+        label: "ECG Window".to_string(),
         note: if cfg!(target_os = "windows") {
-            "Shows the busiest Windows GPU engine, similar to Task Manager.".to_string()
+            "ECG-style view of the busiest Windows GPU engine, similar to Task Manager."
+                .to_string()
         } else {
-            "GPU activity sparkline is currently available on Windows only.".to_string()
+            "ECG Window is currently available on Windows only.".to_string()
         },
         current_percent: 0.0,
         history: Vec::new(),
@@ -457,14 +458,13 @@ fn spawn_gpu_sampler(target: Arc<RwLock<GpuTelemetrySnapshot>>) {
                     guard.current_percent = percent;
                     guard.history = history.iter().copied().collect();
                     if last_error_note.take().is_some() {
-                        guard.note =
-                            "Shows the busiest Windows GPU engine, similar to Task Manager."
-                                .to_string();
+                        guard.note = "ECG-style view of the busiest Windows GPU engine, similar to Task Manager."
+                            .to_string();
                     }
                 }
                 Err(error) => {
                     let note = format!(
-                        "GPU telemetry is using Windows performance counters. Sampling is temporarily unavailable: {error}"
+                        "ECG Window uses Windows performance counters. Sampling is temporarily unavailable: {error}"
                     );
                     if last_error_note.as_deref() != Some(note.as_str()) {
                         let mut guard = target.write().await;
@@ -482,7 +482,7 @@ fn spawn_gpu_sampler(target: Arc<RwLock<GpuTelemetrySnapshot>>) {
 async fn query_windows_gpu_label() -> Result<String> {
     let script = r#"
 $adapter = Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name
-if ([string]::IsNullOrWhiteSpace($adapter)) { 'GPU activity' } else { $adapter.Trim() }
+if ([string]::IsNullOrWhiteSpace($adapter)) { 'ECG Window' } else { 'ECG Window - ' + $adapter.Trim() }
 "#;
     let output = timeout(
         Duration::from_secs(4),
@@ -522,15 +522,15 @@ if ($values.Count -eq 0) {
             .output(),
     )
     .await
-    .context("timed out querying Windows GPU activity counters")?
-    .context("failed to launch PowerShell for GPU activity query")?;
+    .context("timed out querying Windows ECG Window counters")?
+    .context("failed to launch PowerShell for ECG Window query")?;
 
     if !output.status.success() {
-        anyhow::bail!("PowerShell GPU activity query failed");
+        anyhow::bail!("PowerShell ECG Window query failed");
     }
 
     parse_gpu_percent_output(&String::from_utf8_lossy(&output.stdout))
-        .ok_or_else(|| anyhow::anyhow!("could not parse GPU activity percentage"))
+        .ok_or_else(|| anyhow::anyhow!("could not parse ECG Window percentage"))
 }
 
 fn parse_gpu_percent_output(output: &str) -> Option<f32> {

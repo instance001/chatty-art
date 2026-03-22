@@ -19,6 +19,9 @@ Chatty-art is a local media generator.
 - It can make an audio file.
 - It runs on your computer.
 - It saves everything into the `outputs/` folder automatically.
+- It can show a small live `ECG Window` during generation on Windows.
+- It can show recommended hardware-safe limits for the model you selected.
+- It lets you collapse and reopen the `Controls`, `Outputs`, and `Input Tray` columns.
 
 Chatty-art uses local GGUF model files. A GGUF file is just the AI model file you place in the `models/` folder.
 
@@ -591,8 +594,25 @@ Once the page opens:
    - `Generate Video`
    - `Generate Audio`
 7. Watch the progress bar.
+   - On Windows, you can also watch the small `ECG Window` under the progress area. It is meant to feel similar to the Task Manager GPU graph.
 8. When it finishes, the result appears in the preview area.
 9. The file is also saved in `outputs/`.
+
+## Helpful dashboard features
+
+Chatty-art now has a few helper features that make it easier to stay inside the safe range for your current machine.
+
+- `Recommended Limits On This Hardware`
+  The model card shows a quick guide for what is usually safe, stretch, or risky on your detected hardware for the currently selected model and output type.
+
+- `Low VRAM Mode`
+  In `Realism` mode, this uses a more conservative runtime profile. It is slower, but it can save jobs that would otherwise fail on GPUs with limited dedicated VRAM.
+
+- `ECG Window`
+  On Windows, the progress area can show a little live GPU graph during generation. It is an ECG-style "heartbeat" view of local GPU activity, similar to the Task Manager performance graph.
+
+- Collapsible columns
+  The `Controls`, `Outputs`, and `Input Tray` columns can be hidden with `Hide` and brought back from the small button dock near the bottom-right of the app.
 
 ## How to write a prompt
 
@@ -702,6 +722,58 @@ Simple advice:
 - Start with `Square 512` or `Square 768`
 - Use larger presets once everything is working
 
+### Video Resolution
+
+This controls the size used for `Generate GIF` and `Generate Video`.
+
+- Smaller video sizes are much easier on VRAM
+- Video memory use rises very quickly as resolution increases
+
+Simple advice:
+
+- Start with `256x256` for Wan-style video tests
+- Move to `512x512` only after smaller tests work
+- Treat `768x768` as a heavier setting that can fail on weaker or mid-range hardware
+
+### Video Duration
+
+This controls how many seconds Chatty-art tries to generate for GIF or video output.
+
+- Longer duration = more frames
+- More frames = more time and more memory pressure
+
+Simple advice:
+
+- Start with `2s`
+- Try `5s` after that
+- Treat `10s` and `20s` as advanced/heavier settings
+
+### Video FPS
+
+This controls playback smoothness for GIF or video output.
+
+- Low FPS = fewer frames and less hardware load
+- High FPS = smoother motion but more frames to generate
+
+Simple advice:
+
+- Start with `8 FPS`
+- Try `16 FPS` once your shorter clips work reliably
+- Use `24 FPS` only if your model and hardware are already behaving well
+
+### Low VRAM Mode
+
+This is mainly for `Realism` mode.
+
+- It spills more work to CPU
+- It uses a safer low-memory runtime profile
+- It is slower, but it can prevent out-of-memory errors on bigger image, GIF, or video jobs
+
+Simple advice:
+
+- Leave it on if realism jobs are failing with VRAM errors
+- Try turning it off only after you already know your current model/settings run comfortably on your GPU
+
 ### Seed
 
 This is the repeatability number.
@@ -735,6 +807,9 @@ Important:
 - `Expressive` mode can use the selected file as a guide or edit/source cue during planning.
 - `Realism` mode currently uses still images from `input/images/` for these guide/edit workflows.
 - `Realism` does not currently use audio files as references.
+- Some realism video families can also use:
+  - `Set as End Frame`
+  - `Use as Control Video`
 
 ## What gets saved
 

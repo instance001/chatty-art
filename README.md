@@ -12,6 +12,11 @@ Chatty-art is a simple local image/GIF/video/audio generator with:
 - Auto-save into `outputs/`
 - Optional reference media selection from `input/`
 - Input Tray `Use as Guide` / `Edit Selected` controls for reference-driven runs
+- Separate `Generate GIF` and `Generate Video` paths with video resolution, duration, and FPS controls
+- `Low VRAM Mode` for safer realism jobs on tighter GPUs
+- Live `ECG Window` under the progress area on Windows, similar to Task Manager
+- Model-aware `Recommended Limits On This Hardware` guidance in the UI
+- Collapsible `Controls`, `Outputs`, and `Input Tray` columns for easier layout management
 - Optional `Prompt Assist` compiler that expands short prompts into richer local briefs before generation
 
 If you want a true beginner walkthrough, start with [USER_MANUAL.md](./USER_MANUAL.md).
@@ -156,9 +161,15 @@ The app opens at `http://127.0.0.1:7878`.
 - Realism mode uses `stable-diffusion.cpp` locally. On the first realism run, Chatty-art builds `sd-cli` from `diffuse_runtime/` automatically.
 - For the cleanest first realism setup, prefer the exact 6-file starter stack listed above.
 - The Input Tray lets you choose whether the selected file should be used as a `Guide` or treated as the image to `Edit`.
+- The dashboard columns can be collapsed with `Hide` and restored from the bottom-right dock as `Controls`, `Outputs`, and `Input Tray`.
 - In realism mode, image references currently come from `input/images/`.
 - `Prompt Assist` can be set to `Off`, `Gentle`, or `Strong`.
 - Prompt Assist uses a local expressive `llama.cpp` model as an interpreter role before generation.
+- `Generate GIF` and `Generate Video` are separate on purpose. GIF is usually the easier preview/share format, while true local video depends on the selected realism family.
+- GIF/video settings include clip resolution, duration, and FPS.
+- `Low VRAM Mode` uses a safer realism launch profile that spills more work to CPU and tiles VAE decode when needed.
+- The UI now shows `Recommended Limits On This Hardware` based on the selected model, output kind, detected GPU, and whether `Low VRAM Mode` is on.
+- On Windows, the progress area includes a small `ECG Window` that shows the busiest local GPU engine as an ECG-style activity line, similar to the Task Manager graph.
 - If `diffuse_runtime/ggml` is missing, restore the `ggml` submodule or re-copy a full source tree before using realism mode.
 - Realism models may need extra local support files in `models/`, not just one GGUF.
 - Expressive image output is saved as `.png`
