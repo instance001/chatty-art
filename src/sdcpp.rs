@@ -478,12 +478,25 @@ fn apply_low_vram_tuning(
     height: u32,
     args: &mut Vec<String>,
 ) {
-    let high_memory_job =
-        matches!(request.kind, MediaKind::Gif | MediaKind::Video) || width.max(height) > 512;
+    let video_like = matches!(request.kind, MediaKind::Gif | MediaKind::Video);
+    let frame_count = request.settings.video_frame_count();
+    let max_dimension = width.max(height);
+    let high_memory_job = video_like || max_dimension > 512;
+    let stressed_video_job = video_like && (frame_count > 16 || max_dimension > 256);
+    let severe_video_job = video_like && (frame_count > 40 || max_dimension >= 512);
+    let extreme_video_job = video_like && (frame_count > 80 || max_dimension >= 768);
     let low_vram_mode = request.settings.low_vram_mode;
 
     if high_memory_job || low_vram_mode {
         push_flag_once(args, "--offload-to-cpu");
+    }
+
+    if low_vram_mode
+        || extreme_video_job
+        || (matches!(recipe.family, RuntimeFamily::Wan) && severe_video_job)
+        || max_dimension >= 1024
+    {
+        push_flag_once(args, "--diffusion-conv-direct");
     }
 
     if recipe.vae_path.is_some() && (high_memory_job || low_vram_mode) {
@@ -493,6 +506,15 @@ fn apply_low_vram_tuning(
             "--vae-relative-tile-size",
             vae_tile_grid_for_request(request, width, height, low_vram_mode),
         );
+        push_option_once(
+            args,
+            "--vae-tile-overlap",
+            vae_tile_overlap_for_request(request, width, height, low_vram_mode),
+        );
+    }
+
+    if recipe.vae_path.is_some() && (low_vram_mode || stressed_video_job || max_dimension >= 768) {
+        push_flag_once(args, "--vae-conv-direct");
     }
 
     if recipe.vae_path.is_some()
@@ -526,6 +548,33 @@ fn vae_tile_grid_for_request(
         "3x3"
     } else {
         "2x2"
+    }
+}
+
+fn vae_tile_overlap_for_request(
+    request: &GenerateRequest,
+    width: u32,
+    height: u32,
+    low_vram_mode: bool,
+) -> &'static str {
+    if matches!(request.kind, MediaKind::Gif | MediaKind::Video) {
+        if low_vram_mode && (request.settings.video_frame_count() > 40 || width.max(height) >= 768)
+        {
+            "0.2"
+        } else if low_vram_mode
+            || request.settings.video_frame_count() > 16
+            || width.max(height) >= 512
+        {
+            "0.25"
+        } else {
+            "0.35"
+        }
+    } else if low_vram_mode && width.max(height) >= 768 {
+        "0.25"
+    } else if low_vram_mode || width.max(height) >= 1024 {
+        "0.3"
+    } else {
+        "0.5"
     }
 }
 
@@ -2353,6 +2402,7 @@ mod tests {
                 video_resolution: VideoResolutionPreset::Square256,
                 video_duration_seconds: 2,
                 video_fps: 8,
+                audio_duration_seconds: 10,
                 low_vram_mode: false,
                 seed: Some(7),
             },
@@ -2360,6 +2410,13 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            prepared_prompt: None,
+            prepared_negative_prompt: None,
+            prepared_note: None,
+            prepared_interpreter_model: None,
+            prepared_spoken_text: None,
+            audio_literal_prompt: None,
+            audio_segments: Vec::new(),
         }
     }
 
@@ -2690,8 +2747,21 @@ mod tests {
         assert!(args.iter().any(|value| value == "--vae-on-cpu"), "{args:?}");
         assert!(args.iter().any(|value| value == "--vae-tiling"), "{args:?}");
         assert!(
+            args.iter().any(|value| value == "--diffusion-conv-direct"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|value| value == "--vae-conv-direct"),
+            "{args:?}"
+        );
+        assert!(
             args.windows(2)
                 .any(|pair| pair == ["--vae-relative-tile-size", "2x2"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--vae-tile-overlap", "0.25"]),
             "{args:?}"
         );
     }
@@ -2716,8 +2786,21 @@ mod tests {
         );
         assert!(args.iter().any(|value| value == "--vae-tiling"), "{args:?}");
         assert!(
+            args.iter().any(|value| value == "--diffusion-conv-direct"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|value| value == "--vae-conv-direct"),
+            "{args:?}"
+        );
+        assert!(
             args.windows(2)
                 .any(|pair| pair == ["--vae-relative-tile-size", "3x3"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--vae-tile-overlap", "0.3"]),
             "{args:?}"
         );
     }
@@ -2743,8 +2826,55 @@ mod tests {
         assert!(args.iter().any(|value| value == "--vae-tiling"), "{args:?}");
         assert!(args.iter().any(|value| value == "--vae-on-cpu"), "{args:?}");
         assert!(
+            args.iter().any(|value| value == "--vae-conv-direct"),
+            "{args:?}"
+        );
+        assert!(
             args.windows(2)
                 .any(|pair| pair == ["--vae-relative-tile-size", "3x3"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--vae-tile-overlap", "0.3"]),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn large_wan_video_job_enables_direct_convolution_without_manual_low_vram_mode() {
+        let mut recipe = base_recipe(
+            Path::new("."),
+            RuntimeFamily::Wan,
+            Path::new("models/wan.gguf"),
+        );
+        recipe.runtime_tree_ready = true;
+        recipe.vae_path = Some(PathBuf::from("models/wan_2.1_vae.safetensors"));
+        let mut request = image_request(Some("blurry"));
+        request.kind = MediaKind::Video;
+        request.settings.video_resolution = VideoResolutionPreset::Square768;
+        request.settings.video_duration_seconds = 5;
+        request.settings.video_fps = 16;
+        request.settings.low_vram_mode = false;
+
+        let args = build_base_sdcpp_args(&recipe, &request, 7).unwrap();
+
+        assert!(
+            args.iter().any(|value| value == "--diffusion-conv-direct"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|value| value == "--vae-conv-direct"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--vae-relative-tile-size", "3x3"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--vae-tile-overlap", "0.25"]),
             "{args:?}"
         );
     }

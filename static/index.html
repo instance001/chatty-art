@@ -34,7 +34,12 @@
             <button class="mode-option active" data-style="expressive" type="button">Expressive</button>
             <button class="mode-option" data-style="realism" type="button">Realism</button>
           </div>
+          <div class="mode-switch secondary-switch" aria-label="Prompt panel mode">
+            <button class="mode-option active" data-workflow="basic" type="button">Basic</button>
+            <button class="mode-option" data-workflow="advanced" type="button">Advanced</button>
+          </div>
           <div class="selection-summary style-summary" id="styleSummary">Expressive uses the bundled llama.cpp planner plus Chatty-art's local renderer for fast all-in-one output.</div>
+          <div class="selection-summary workflow-summary" id="workflowSummary">Basic keeps the workflow simple. Advanced unlocks Preview Handoff and future power-user controls.</div>
           <div class="runtime-badges" id="runtimeBadges"></div>
           <label class="field-block">
             <span class="field-title">What should Chatty-art make?</span>
@@ -45,6 +50,20 @@
             <span class="field-title">Negative Prompt</span>
             <textarea id="negativePromptInput" rows="3" placeholder="Optional: things realism mode should avoid, like blurry, low quality, extra limbs, bad anatomy."></textarea>
           </label>
+
+          <label class="field-block hidden" id="audioLiteralPromptBlock">
+            <span class="field-title" id="audioLiteralPromptTitle">Words / Sounds</span>
+            <textarea id="audioLiteralPromptInput" rows="3" placeholder="Optional verbatim words or literal sound cues to preserve exactly."></textarea>
+          </label>
+
+          <div class="field-block hidden" id="audioSegmentsBlock">
+            <div class="field-title-row">
+              <span class="field-title" id="audioSegmentsTitle">Words / Sound Sequence</span>
+              <button id="addAudioSegmentButton" class="ghost-button mini-ghost-button" type="button">Add New Prompt Box</button>
+            </div>
+            <p class="field-help" id="audioSegmentsHelp">Advanced audio mode lets you stack multiple voice or sound events. Each box can start after the last box or at the same time as it.</p>
+            <div id="audioSegmentsList" class="audio-segments-list"></div>
+          </div>
 
           <div class="field-row">
             <label class="field-block">
@@ -127,6 +146,17 @@
               <span class="setting-copy" id="videoFpsCopy">Playback speed for GIF/video output. Higher FPS is smoother but heavier.</span>
             </label>
 
+            <label class="setting-card">
+              <span class="setting-title">Audio Duration <button class="help-dot" type="button" data-tip="Used for Generate Audio. Stable Audio style soundscape models use this directly. Speech models like OuteTTS mostly care about prompt length instead.">?</button></span>
+              <select id="audioDurationInput">
+                <option value="5">5s</option>
+                <option value="10" selected>10s</option>
+                <option value="20">20s</option>
+                <option value="30">30s</option>
+              </select>
+              <span class="setting-copy" id="audioDurationCopy">Target clip length for realism soundscape audio. Speech-style audio models mostly ignore this.</span>
+            </label>
+
             <label class="setting-card" id="lowVramCard">
               <span class="setting-title">Low VRAM Mode <button class="help-dot" type="button" data-tip="Uses a more conservative realism runtime profile by spilling more work to CPU and tiling VAE decode. This is slower, but it can save bigger images and video jobs on GPUs that run out of dedicated VRAM.">?</button></span>
               <label class="setting-toggle">
@@ -151,6 +181,68 @@
               <input id="seedInput" type="number" min="0" max="4294967295" step="1" placeholder="Random">
               <span class="setting-copy">For repeatable results. Same seed plus same settings should reproduce the same output.</span>
             </label>
+          </div>
+        </article>
+
+        <article class="panel" id="previewHandoffPanel">
+          <div class="panel-header">
+            <h2>Preview Handoff</h2>
+            <span class="panel-note">Inspect and refine what gets sent to the generator before you commit</span>
+          </div>
+
+          <div class="handoff-toolbar">
+            <label class="field-block compact-field">
+              <span class="field-title">Preview for</span>
+              <select id="prepareKindInput">
+                <option value="image">Image</option>
+                <option value="gif">GIF</option>
+                <option value="video">Video</option>
+                <option value="audio">Audio</option>
+              </select>
+            </label>
+
+            <div class="handoff-actions">
+              <button id="prepareRequestButton" class="ghost-button" type="button">Preview Handoff</button>
+              <button id="clearPreparedButton" class="ghost-button" type="button">Clear</button>
+            </div>
+          </div>
+
+          <div id="preparedEmpty" class="selection-summary handoff-empty">
+            Preview Handoff shows the compiled prompt, separated spoken text when relevant, merged negative prompt, estimated frames, and a rough local time estimate before you generate.
+          </div>
+
+          <div id="preparedPanel" class="prepared-panel hidden">
+            <div class="prepared-meta">
+              <div class="prepared-chip-group" id="preparedMetaChips"></div>
+              <div class="prepared-copy" id="preparedNote"></div>
+            </div>
+
+            <label class="field-block">
+              <span class="field-title" id="preparedPromptTitle">Prepared Prompt</span>
+              <textarea id="preparedPromptInput" rows="5" placeholder="The compiled handoff prompt will appear here after Preview Handoff runs."></textarea>
+            </label>
+
+            <label class="field-block hidden" id="preparedSpokenBlock">
+              <span class="field-title">Prepared Spoken Text</span>
+              <textarea id="preparedSpokenInput" rows="4" placeholder="Only this text will be spoken aloud by speech-style audio models."></textarea>
+            </label>
+
+            <label class="field-block" id="preparedNegativeBlock">
+              <span class="field-title">Prepared Negative Prompt</span>
+              <textarea id="preparedNegativeInput" rows="3" placeholder="The effective negative prompt will appear here after Preview Handoff runs."></textarea>
+            </label>
+
+            <div class="prepared-estimate" id="preparedEstimate"></div>
+            <div class="prepared-lists">
+              <div class="prepared-list">
+                <strong>Focus Cues</strong>
+                <div id="preparedFocusTags" class="prepared-chip-group"></div>
+              </div>
+              <div class="prepared-list">
+                <strong>Assumptions</strong>
+                <div id="preparedAssumptions" class="prepared-copy"></div>
+              </div>
+            </div>
           </div>
         </article>
 

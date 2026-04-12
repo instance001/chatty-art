@@ -31,7 +31,10 @@ Chatty-art now has two generation modes:
   Uses the built-in local `llama.cpp` + renderer workflow.
 
 - `Realism`
-  Uses local `stable-diffusion.cpp` for diffusion-style image, GIF, or video workflows.
+  Uses local specialist backends:
+  - `stable-diffusion.cpp` for diffusion-style image, GIF, or video workflows
+  - `OuteTTS` for realism speech / voice output
+  - `Stable Audio Open` for realism soundscape / SFX style audio
 
 ## Project license
 
@@ -273,6 +276,87 @@ Important note:
 - Until that is pinned down, the current known-good video recommendation stays `Wan2.1 T2V 14B` from the starter stack.
 - If you see older notes elsewhere in this manual mentioning `Wan2.1 VACE 1.3B` as the default next step, treat that as experimental rather than the current recommended download.
 
+## Audio downloads and where they go
+
+The easiest audio path in Chatty-art is still `Expressive`, but the realism audio lanes now work too.
+
+Simple version:
+
+- `Expressive` audio = easiest quick local WAV output
+- `Realism` speech = `OuteTTS`
+- `Realism` soundscape / SFX = `Stable Audio Open`
+
+### Recommended audio downloads to keep on hand
+
+#### OuteTTS speech GGUFs
+
+These are the cleanest first audio models to stage for local speech-style realism audio.
+
+1. `OuteTTS-1.0-0.6B-FP16.gguf`
+   - Model page:
+     https://huggingface.co/OuteAI/OuteTTS-1.0-0.6B-GGUF
+   - Direct file:
+     https://huggingface.co/OuteAI/OuteTTS-1.0-0.6B-GGUF/resolve/main/OuteTTS-1.0-0.6B-FP16.gguf
+
+2. `Llama-OuteTTS-1.0-1B-FP16.gguf`
+   - Model page:
+     https://huggingface.co/OuteAI/Llama-OuteTTS-1.0-1B-GGUF
+   - Direct file:
+     https://huggingface.co/OuteAI/Llama-OuteTTS-1.0-1B-GGUF/resolve/main/Llama-OuteTTS-1.0-1B-FP16.gguf
+
+3. `OuteTTS` runtime source
+   - Project page:
+     https://github.com/edwko/OuteTTS
+
+Where they go:
+
+- Put the `.gguf` files into `models/`
+- Keep any downloaded runtime/source tree out of `models/`
+- A good place for the source tree is:
+  `audio_runtime/outetts/`
+
+#### Stable Audio Open package
+
+This is not a one-file GGUF. It is a model package that needs to stay together as a folder.
+
+1. `stable-audio-open-1.0`
+   - Model page:
+     https://huggingface.co/stabilityai/stable-audio-open-1.0
+
+2. `stable-audio-tools` runtime source
+   - Project page:
+     https://github.com/Stability-AI/stable-audio-tools
+
+Where it goes:
+
+- Keep the package together as:
+  `models/stable-audio-open-1.0/`
+- Keep the runtime/source code out of `models/`
+- A good place for the source tree is:
+  `audio_runtime/stable_audio_tools/`
+
+Plain-language rule:
+
+- one `.gguf` file -> usually place it directly in `models/`
+- a model package with folders like `tokenizer/`, `transformer/`, `vae/`, `scheduler/` -> keep that whole folder together inside `models/`
+- source code zip or GitHub repo -> do not place that in `models/`
+
+If you use the Hugging Face CLI for Stable Audio, the easiest pattern is:
+
+```powershell
+hf auth login
+hf download stabilityai/stable-audio-open-1.0 --local-dir stable-audio-open-1.0
+```
+
+Then move the finished `stable-audio-open-1.0` folder into `models/`.
+
+Important:
+
+- `OuteTTS` is the cleaner first target for speech-style audio
+- `stable-audio-open-1.0` is a heavier realism soundscape package, so first runs may be slower than `OuteTTS`
+- neither of these audio downloads is required for the current image/video realism starter stack
+- if you are brand new and just want a working output right now, `Expressive` audio is still the easy starting point
+
 ## Quality and hardware gradient
 
 Think of the realism models like a ladder.
@@ -374,7 +458,7 @@ Beginner examples:
 
 Important:
 
-- `Realism` mode does not do audio
+- `Realism` audio uses specialist audio backends rather than one-file diffusion GGUFs
 - one-file realism models are the easiest way to test whether your local diffusion runtime is working
 
 ### 3. Realism GGUFs that need companion weights
@@ -439,13 +523,16 @@ That is why a Wan download page may list more than one GGUF and more than one he
   Can make `Image`
   Most realism families can also make `GIF`
   Some realism families can also make true `Video`
-  `Realism` does not currently make `Audio`
+  Can also make `Audio` through specialist backends:
+  - `OuteTTS` for realism speech / voice
+  - `Stable Audio Open` for realism soundscape / SFX style output
 
 Simple advice:
 
 - If you want the easiest all-in-one local experience, start with `Expressive`
 - If you want more literal or photoreal visuals, use `Realism`
-- If you want sound output, use `Expressive`
+- If you want the quickest simple sound output, use `Expressive`
+- If you want realism speech or realism sound design, use `Realism` with the dedicated audio models
 
 ## How to tell what you downloaded
 
@@ -584,8 +671,9 @@ Once the page opens:
 1. Find the `Prompt` box.
 2. Choose a mode:
    - `Expressive` for the built-in fast local renderer
-   - `Realism` for local `stable-diffusion.cpp` diffusion/GIF/video generation
+   - `Realism` for local diffusion-style visuals plus the specialist realism audio backends
 3. Type what you want to create.
+   - If you picked a realism audio model, you can also fill in the extra `Words / Script` or `Words / Sounds` box.
 4. Pick a model from the dropdown.
 5. Leave the default settings alone for your first test.
 6. Click one button:
@@ -640,6 +728,179 @@ If the output feels vague, add:
 - motion words for GIF or video
 - sound words for audio
 
+## Audio prompt workflow
+
+When you select a realism audio model, Chatty-art can work in two prompt modes:
+
+- `Basic`
+  The simple beginner path. You get the normal audio prompt boxes and can generate quickly.
+
+- `Advanced`
+  The power-user path. You can add multiple timed audio boxes so a job can become a sequence instead of one single literal line.
+
+In `Basic`, Chatty-art can show three separate prompt boxes:
+
+- `Prompt`
+  This is the descriptive direction box. Use it for tone, mood, pacing, texture, style, environment, and how the result should feel.
+
+- `Negative Prompt`
+  This is where you say what you do not want.
+
+- `Words / Script` or `Words / Sounds`
+  This is the literal box. Use it for exact spoken words or direct sound cues that should be preserved more directly.
+
+In `Advanced`, the literal box can expand into a sequence builder:
+
+- click `Add new prompt box` to add another speech or sound segment
+- use the `X` in the top-right of a box to remove it
+- choose whether a box starts `after last box` or `same time as last box`
+- give each box a reusable name so Chatty-art can keep a stable identity
+
+Plain-language meaning:
+
+- `Prompt` = how it should sound
+- `Negative Prompt` = what to avoid
+- `Words / Script` = exactly what should be spoken
+- `Words / Sounds` = literal ingredient list of sound cues
+
+### Basic vs Advanced
+
+Use `Basic` if:
+
+- you want the easiest path
+- you only need one spoken line or one sound prompt
+- you are still learning the workflow
+
+Use `Advanced` if:
+
+- you want a conversation with multiple turns
+- you want two voices or sound layers to overlap
+- you want the same voice or layer to return later in the sequence
+- you want stronger control over timing
+
+Beginner advice:
+
+- Start in `Basic`
+- Move to `Advanced` only when you actually need multiple segments
+- Reuse the same name if you want the same identity to come back
+
+### For OuteTTS speech models
+
+Use:
+
+- `Prompt` for delivery direction
+- `Words / Script` for the exact line to say
+
+Good beginner example:
+
+- `Prompt`
+  `warm Australian female voice, calm pacing, clear diction, friendly smile, close microphone`
+- `Words / Script`
+  `Welcome to Chatty-art. Everything is running locally on this machine.`
+
+Simple advice:
+
+- Put the exact spoken sentence in `Words / Script`
+- Put voice, tone, speed, mood, and delivery notes in `Prompt`
+- Use `Negative Prompt` for things like robotic delivery, harsh sibilance, mumbling, noisy background, or clipping
+
+In `Advanced` mode:
+
+- each box becomes one speech segment
+- `Voice Name / Character Note` is the identity field
+- reusing the same voice name tells Chatty-art to keep the same character-like voice identity across those segments
+- using a different voice name tells Chatty-art to make a different stable voice identity
+- `same time as last box` overlaps the speech with the previous box
+- `after last box` plays it after the previous segment ends
+
+Simple example:
+
+- Box 1
+  - `Voice Name / Character Note`: `John`
+  - timing: `after last box`
+  - `Words / Script`: `Hello there.`
+- Box 2
+  - `Voice Name / Character Note`: `Jane`
+  - timing: `after last box`
+  - `Words / Script`: `Hi John.`
+- Box 3
+  - `Voice Name / Character Note`: `John`
+  - timing: `same time as last box`
+  - `Words / Script`: `Wait, listen.`
+
+### For Stable Audio Open sound models
+
+Use:
+
+- `Prompt` for the overall scene and texture
+- `Words / Sounds` for literal cues you want preserved more directly
+
+Good beginner example:
+
+- `Prompt`
+  `quiet nighttime forest ambience, cinematic depth, soft wind, natural field recording`
+- `Words / Sounds`
+  `distant owl, dry leaves, soft wind, creek water`
+
+Simple advice:
+
+- Think of `Words / Sounds` as the literal ingredient list
+- Think of `Prompt` as the mixing, atmosphere, and style direction
+- Use `Negative Prompt` for things like distortion, harsh static, crowd noise, clipping, or artificial digital buzz
+
+In `Advanced` mode:
+
+- each box becomes one sound layer or timed event
+- `Layer Name / Sound Note` is the identity field
+- reusing the same layer name tells Chatty-art to keep the same seeded sound identity across those segments
+- using a different layer name tells Chatty-art to make a different stable layer identity
+- `same time as last box` overlaps the sound with the previous box
+- `after last box` starts it after the previous segment ends
+
+Simple example:
+
+- Box 1
+  - `Layer Name / Sound Note`: `Rain Bed`
+  - timing: `after last box`
+  - `Words / Sounds`: `steady rain, soft roof patter`
+- Box 2
+  - `Layer Name / Sound Note`: `Thunder Hit`
+  - timing: `same time as last box`
+  - `Words / Sounds`: `distant thunder crack`
+- Box 3
+  - `Layer Name / Sound Note`: `Rain Bed`
+  - timing: `after last box`
+  - `Words / Sounds`: `steady rain, soft roof patter`
+
+### If you only fill in one box
+
+- For OuteTTS, `Words / Script` alone is enough to make it speak
+- For Stable Audio Open, `Words / Sounds` alone is enough to give it direct sound cues
+- Using both usually gives the best control
+- If you are unsure, keep the literal box short and clear, and keep the main `Prompt` focused on mood and quality
+
+### Preview Handoff for audio
+
+Before you generate, the `Preview Handoff` panel can show how Chatty-art is preparing the request.
+
+For speech models, look for:
+
+- `Prepared Spoken Text`
+- `Speech Direction`
+
+For sound models, look for:
+
+- the compiled prompt
+- the effective negative prompt
+- the literal `Words / Sounds` cues shown as their own separate lane
+
+In `Advanced` mode, the handoff is still per backend:
+
+- `OuteTTS` prepares a speech sequence
+- `Stable Audio Open` prepares a sound sequence
+
+Right now Chatty-art does **not** merge those two backends into one combined audio render. Speech and sound stay in their own specialist lanes for now.
+
 ## Prompt Assist
 
 Chatty-art now includes `Prompt Assist`.
@@ -666,6 +927,14 @@ Simple advice:
 Prompt Assist still runs locally.
 
 It uses a local expressive `llama.cpp` model as an interpreter role before the main generation step.
+
+For realism speech models, Prompt Assist now separates spoken words from delivery direction.
+
+For realism sound models, Prompt Assist only expands the descriptive prompt and negative prompt.
+
+The literal `Words / Script` or `Words / Sounds` boxes stay verbatim and are not rewritten by Prompt Assist.
+
+For realism audio models, the `Words / Script` or `Words / Sounds` field is the best place for verbatim content.
 
 ## What each setting means
 

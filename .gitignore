@@ -7,6 +7,8 @@
 /diffuse_runtime/.git
 /diffuse_runtime/**/.git
 /diffuse_runtime/examples/server/frontend/node_modules/
+/audio_runtime/stable_audio_venv/
+/audio_runtime/**/.venv/
 /models/*
 !/models/.gitkeep
 /input/audio/*
@@ -27,5 +29,15 @@
 !/workflows/.gitkeep
 /Thumbs.db
 /.DS_Store
+/node_modules/
 /tmp_*
 /sdcli-help.txt
+/stable_audio_server.out.log
+/stable_audio_server.err.log
+*.log
+*.pyc
+*.pyo
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/

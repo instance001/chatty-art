@@ -14,7 +14,11 @@ const state = {
   currentJobId: null,
   activeFilter: "all",
   generating: false,
+  preparing: false,
   generationStyle: "expressive",
+  workflowMode: "basic",
+  audioSegments: [],
+  preparedHandoff: null,
 };
 
 const MAX_RUNTIME_SEED = 4294967295;
@@ -27,6 +31,7 @@ const MODE_DEFAULTS = {
     videoResolution: "square512",
     videoDuration: "5",
     videoFps: "8",
+    audioDuration: "10",
     lowVram: false,
   },
   realism: {
@@ -37,6 +42,7 @@ const MODE_DEFAULTS = {
     videoResolution: "square256",
     videoDuration: "2",
     videoFps: "8",
+    audioDuration: "10",
     lowVram: true,
   },
 };
@@ -45,8 +51,34 @@ const elements = {
   promptInput: document.getElementById("promptInput"),
   negativePromptInput: document.getElementById("negativePromptInput"),
   negativePromptBlock: document.getElementById("negativePromptBlock"),
+  audioLiteralPromptBlock: document.getElementById("audioLiteralPromptBlock"),
+  audioLiteralPromptTitle: document.getElementById("audioLiteralPromptTitle"),
+  audioLiteralPromptInput: document.getElementById("audioLiteralPromptInput"),
+  audioSegmentsBlock: document.getElementById("audioSegmentsBlock"),
+  audioSegmentsTitle: document.getElementById("audioSegmentsTitle"),
+  audioSegmentsHelp: document.getElementById("audioSegmentsHelp"),
+  audioSegmentsList: document.getElementById("audioSegmentsList"),
+  addAudioSegmentButton: document.getElementById("addAudioSegmentButton"),
+  prepareKindInput: document.getElementById("prepareKindInput"),
+  prepareRequestButton: document.getElementById("prepareRequestButton"),
+  clearPreparedButton: document.getElementById("clearPreparedButton"),
+  preparedEmpty: document.getElementById("preparedEmpty"),
+  preparedPanel: document.getElementById("preparedPanel"),
+  preparedMetaChips: document.getElementById("preparedMetaChips"),
+  preparedNote: document.getElementById("preparedNote"),
+  preparedPromptTitle: document.getElementById("preparedPromptTitle"),
+  preparedPromptInput: document.getElementById("preparedPromptInput"),
+  preparedSpokenBlock: document.getElementById("preparedSpokenBlock"),
+  preparedSpokenInput: document.getElementById("preparedSpokenInput"),
+  preparedNegativeBlock: document.getElementById("preparedNegativeBlock"),
+  preparedNegativeInput: document.getElementById("preparedNegativeInput"),
+  preparedEstimate: document.getElementById("preparedEstimate"),
+  preparedFocusTags: document.getElementById("preparedFocusTags"),
+  preparedAssumptions: document.getElementById("preparedAssumptions"),
   styleButtons: [...document.querySelectorAll("[data-style]")],
+  workflowButtons: [...document.querySelectorAll("[data-workflow]")],
   styleSummary: document.getElementById("styleSummary"),
+  workflowSummary: document.getElementById("workflowSummary"),
   runtimeBadges: document.getElementById("runtimeBadges"),
   modelSelect: document.getElementById("modelSelect"),
   modelSummary: document.getElementById("modelSummary"),
@@ -64,6 +96,8 @@ const elements = {
   videoDurationCopy: document.getElementById("videoDurationCopy"),
   videoFpsInput: document.getElementById("videoFpsInput"),
   videoFpsCopy: document.getElementById("videoFpsCopy"),
+  audioDurationInput: document.getElementById("audioDurationInput"),
+  audioDurationCopy: document.getElementById("audioDurationCopy"),
   lowVramCard: document.getElementById("lowVramCard"),
   lowVramInput: document.getElementById("lowVramInput"),
   lowVramCopy: document.getElementById("lowVramCopy"),
@@ -102,6 +136,7 @@ const elements = {
   clearReference: document.getElementById("clearReference"),
   actionButtons: [...document.querySelectorAll(".action-button")],
   trayFilters: [...document.querySelectorAll(".tray-filter")],
+  previewHandoffPanel: document.getElementById("previewHandoffPanel"),
 };
 
 const GPU_TELEMETRY_WIDTH = 180;
@@ -119,10 +154,14 @@ const trackedSettingInputs = [
   elements.videoResolutionInput,
   elements.videoDurationInput,
   elements.videoFpsInput,
+  elements.audioDurationInput,
   elements.lowVramInput,
 ];
 
-elements.refreshAll.addEventListener("click", () => refreshEverything());
+elements.refreshAll.addEventListener("click", () => {
+  clearPreparedHandoff();
+  refreshEverything();
+});
 elements.clearReference.addEventListener("click", () => clearReferenceSlots());
 elements.referenceGuide.addEventListener("click", () => assignSelectedReference("primary", "guide"));
 elements.referenceEdit.addEventListener("click", () => assignSelectedReference("primary", "edit"));
@@ -135,7 +174,11 @@ elements.showLeftColumn.addEventListener("click", () => toggleColumn("left", tru
 elements.showCenterColumn.addEventListener("click", () => toggleColumn("center", true));
 elements.showTray.addEventListener("click", () => toggleTray(true));
 elements.modelSelect.addEventListener("change", () => {
+  clearPreparedHandoff();
+  renderStyleMode();
+  renderPrepareKindOptions();
   renderModelSummary();
+  refreshAudioSettingCopy();
   renderReferenceIntentControls();
   syncActionState();
 });
@@ -157,23 +200,120 @@ elements.styleButtons.forEach((button) => {
       applyModeDefaults(nextStyle);
     }
     state.generationStyle = nextStyle;
+    clearPreparedHandoff();
     renderStyleMode();
     renderModels();
     renderReferenceIntentControls();
     syncActionState();
   });
 });
+elements.workflowButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const nextMode = button.dataset.workflow;
+    if (!nextMode || nextMode === state.workflowMode) {
+      return;
+    }
+
+    if (nextMode === "basic") {
+      clearPreparedHandoff();
+    }
+
+    state.workflowMode = nextMode;
+    renderPromptWorkflowMode();
+    syncActionState();
+  });
+});
+
+function handleTrackedSettingMutation() {
+  state.lastAutoDefaultsStyle = null;
+  refreshVideoSettingCopy();
+  clearPreparedHandoff();
+  renderModelSummary();
+}
 
 trackedSettingInputs.forEach((input) => {
-  input.addEventListener("change", () => {
-    state.lastAutoDefaultsStyle = null;
-    refreshVideoSettingCopy();
-  });
+  input.addEventListener("change", handleTrackedSettingMutation);
+  input.addEventListener("input", handleTrackedSettingMutation);
+});
+
+elements.prepareRequestButton.addEventListener("click", () => prepareGenerationRequest());
+elements.clearPreparedButton.addEventListener("click", () => clearPreparedHandoff());
+elements.promptInput.addEventListener("input", () => clearPreparedHandoff());
+elements.negativePromptInput.addEventListener("input", () => clearPreparedHandoff());
+elements.audioLiteralPromptInput.addEventListener("input", () => clearPreparedHandoff());
+elements.promptAssistInput.addEventListener("change", () => clearPreparedHandoff());
+elements.prepareKindInput.addEventListener("change", () => clearPreparedHandoff());
+elements.addAudioSegmentButton.addEventListener("click", () => {
+  const model = getSelectedModel();
+  if (!isAdvancedAudioSegmentsEnabled(model)) {
+    return;
+  }
+  seedAudioSegmentsFromBasicField(model);
+  state.audioSegments.push(createAudioSegment());
+  renderAudioPromptInputs();
+  clearPreparedHandoff();
+  syncActionState();
+});
+elements.audioSegmentsList.addEventListener("input", (event) => {
+  const target = event.target;
+  const index = Number(target.dataset.segmentIndex);
+  if (!Number.isInteger(index) || !state.audioSegments[index]) {
+    return;
+  }
+
+  if (target.matches(".audio-segment-label-input")) {
+    state.audioSegments[index].label = target.value;
+  } else if (target.matches(".audio-segment-literal-input")) {
+    state.audioSegments[index].literal = target.value;
+  } else {
+    return;
+  }
+
+  clearPreparedHandoff();
+  refreshAudioSettingCopy();
+  syncActionState();
+});
+elements.audioSegmentsList.addEventListener("change", (event) => {
+  const target = event.target;
+  const index = Number(target.dataset.segmentIndex);
+  if (!Number.isInteger(index) || !state.audioSegments[index]) {
+    return;
+  }
+
+  if (!target.matches(".audio-segment-timing-input")) {
+    return;
+  }
+
+  state.audioSegments[index].same_time_as_previous = Boolean(target.checked);
+  renderAudioPromptInputs();
+  clearPreparedHandoff();
+  refreshAudioSettingCopy();
+  syncActionState();
+});
+elements.audioSegmentsList.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!target.matches(".audio-segment-remove")) {
+    return;
+  }
+
+  const index = Number(target.dataset.segmentIndex);
+  if (!Number.isInteger(index)) {
+    return;
+  }
+
+  state.audioSegments.splice(index, 1);
+  renderAudioPromptInputs();
+  clearPreparedHandoff();
+  refreshAudioSettingCopy();
+  syncActionState();
 });
 
 connectSocket();
 applyModeDefaults(state.generationStyle);
 renderStyleMode();
+renderPromptWorkflowMode();
+renderPrepareKindOptions();
+renderPreparedHandoff();
 refreshEverything();
 startGpuTelemetryPolling();
 
@@ -191,7 +331,7 @@ async function refreshEverything() {
 async function loadRuntimeStatus() {
   try {
     state.runtimeStatus = await fetchJson("/api/runtime");
-  } catch (error) {
+  } catch {
     state.runtimeStatus = null;
   }
   renderStyleMode();
@@ -200,7 +340,7 @@ async function loadRuntimeStatus() {
 async function loadHardwareProfile() {
   try {
     state.hardwareProfile = await fetchJson("/api/hardware");
-  } catch (error) {
+  } catch {
     state.hardwareProfile = null;
   }
 
@@ -210,7 +350,7 @@ async function loadHardwareProfile() {
 async function loadGpuTelemetry() {
   try {
     state.gpuTelemetry = await fetchJson("/api/telemetry/gpu");
-  } catch (error) {
+  } catch {
     state.gpuTelemetry = {
       supported: false,
       label: "ECG Window",
@@ -250,6 +390,7 @@ function applyModeDefaults(style) {
   elements.videoResolutionInput.value = preset.videoResolution;
   elements.videoDurationInput.value = preset.videoDuration;
   elements.videoFpsInput.value = preset.videoFps;
+  elements.audioDurationInput.value = preset.audioDuration;
   elements.lowVramInput.checked = Boolean(preset.lowVram);
   refreshSettingDisplays();
 }
@@ -259,6 +400,7 @@ function refreshSettingDisplays() {
     input.dispatchEvent(new Event("input"));
   });
   refreshVideoSettingCopy();
+  refreshAudioSettingCopy();
 }
 
 function settingsMatchPreset(style) {
@@ -275,6 +417,7 @@ function settingsMatchPreset(style) {
     && elements.videoResolutionInput.value === preset.videoResolution
     && elements.videoDurationInput.value === preset.videoDuration
     && elements.videoFpsInput.value === preset.videoFps
+    && elements.audioDurationInput.value === preset.audioDuration
     && elements.lowVramInput.checked === Boolean(preset.lowVram)
   );
 }
@@ -285,6 +428,187 @@ function refreshVideoSettingCopy() {
   const frames = Math.max(1, seconds * fps);
   elements.videoDurationCopy.textContent = `Used for GIF/video output. ${seconds}s at ${fps} FPS = ${frames} frames.`;
   elements.videoFpsCopy.textContent = "Playback speed for GIF/video output. Higher FPS is smoother but heavier.";
+}
+
+function refreshAudioSettingCopy() {
+  const selectedModel = getSelectedModel();
+  const seconds = Math.max(1, Number(elements.audioDurationInput.value || 0));
+  const segmentCount = getNormalizedAudioSegments().length;
+  const isStableAudio = selectedModel?.backend === "audio_runtime" && !selectedModel?.supports_voice_output;
+  const isSpeechAudio = selectedModel?.backend === "audio_runtime" && selectedModel?.supports_voice_output;
+
+  if (isStableAudio) {
+    if (isAdvancedAudioSegmentsEnabled(selectedModel) && segmentCount > 1) {
+      elements.audioDurationCopy.textContent = `Target clip length for realism soundscape audio. ${seconds}s is applied per box in advanced mode, with ${segmentCount} boxes currently queued.`;
+      return;
+    }
+    elements.audioDurationCopy.textContent = `Target clip length for realism soundscape audio. ${seconds}s will be handed to the Stable Audio runtime.`;
+    return;
+  }
+
+  if (isSpeechAudio) {
+    if (isAdvancedAudioSegmentsEnabled(selectedModel) && segmentCount > 1) {
+      elements.audioDurationCopy.textContent = `Speech-style audio models mainly care about prompt length. In advanced mode, ${segmentCount} script boxes become separate speech segments.`;
+      return;
+    }
+    elements.audioDurationCopy.textContent = "Speech-style audio models mainly care about prompt length and optional voice reference. This duration control is mostly for soundscape/SFX audio.";
+    return;
+  }
+
+  if (state.generationStyle === "expressive") {
+    elements.audioDurationCopy.textContent = "Expressive audio mostly follows the local planner path. This duration control is mainly for realism soundscape audio.";
+    return;
+  }
+
+  elements.audioDurationCopy.textContent = `Used for Generate Audio. ${seconds}s is the target clip length for realism soundscape audio. Speech models mostly ignore it.`;
+}
+
+function createAudioSegment(seed = {}) {
+  return {
+    label: seed.label || "",
+    literal: seed.literal || "",
+    same_time_as_previous: Boolean(seed.same_time_as_previous),
+  };
+}
+
+function getNormalizedAudioSegments() {
+  return state.audioSegments
+    .map((segment) => ({
+      label: String(segment.label || "").trim(),
+      literal: String(segment.literal || "").trim(),
+      same_time_as_previous: Boolean(segment.same_time_as_previous),
+    }))
+    .filter((segment) => segment.literal)
+    .map((segment) => ({
+      label: segment.label || null,
+      literal: segment.literal,
+      same_time_as_previous: segment.same_time_as_previous,
+    }));
+}
+
+function isAdvancedAudioSegmentsEnabled(model = getSelectedModel()) {
+  return Boolean(
+    model
+    && model.backend === "audio_runtime"
+    && state.workflowMode === "advanced"
+  );
+}
+
+function seedAudioSegmentsFromBasicField(model = getSelectedModel()) {
+  if (!isAdvancedAudioSegmentsEnabled(model) || state.audioSegments.length) {
+    return;
+  }
+
+  const literal = elements.audioLiteralPromptInput.value.trim();
+  state.audioSegments = [createAudioSegment({ literal })];
+}
+
+function renderAudioPromptInputs() {
+  const selectedModel = getSelectedModel();
+  const isDedicatedAudioModel = selectedModel && selectedModel.backend === "audio_runtime";
+  const isSpeechAudio = isDedicatedAudioModel && selectedModel.supports_voice_output;
+  const advancedAudio = isAdvancedAudioSegmentsEnabled(selectedModel);
+
+  if (advancedAudio) {
+    seedAudioSegmentsFromBasicField(selectedModel);
+  }
+
+  elements.audioLiteralPromptBlock.classList.toggle("hidden", !isDedicatedAudioModel || advancedAudio);
+  elements.audioSegmentsBlock.classList.toggle("hidden", !advancedAudio);
+
+  if (!isDedicatedAudioModel) {
+    elements.audioLiteralPromptTitle.textContent = "Words / Sounds";
+    elements.audioLiteralPromptInput.placeholder = "Optional verbatim words or literal sound cues to preserve exactly.";
+    elements.audioSegmentsList.innerHTML = "";
+    return;
+  }
+
+  elements.audioLiteralPromptTitle.textContent = isSpeechAudio ? "Words / Script" : "Words / Sounds";
+  elements.audioLiteralPromptInput.placeholder = isSpeechAudio
+    ? "Optional exact words to be spoken aloud. Leave the main Prompt field for delivery and style notes."
+    : "Optional literal sound cues to preserve exactly, like dripping water, distant thunder, crackling fire.";
+
+  if (!advancedAudio) {
+    elements.audioSegmentsList.innerHTML = "";
+    return;
+  }
+
+  elements.audioSegmentsTitle.textContent = isSpeechAudio ? "Script Sequence" : "Sound Sequence";
+  elements.audioSegmentsHelp.textContent = isSpeechAudio
+    ? "Each box becomes its own spoken segment. Use the main Prompt field for delivery direction, these boxes for exact lines, and reuse the same Voice Name when you want the same character voice to stay consistent."
+    : "Each box becomes its own sound event. Use the main Prompt field for the overall scene, these boxes for literal sound cues, and reuse the same Layer Name when you want the same sound identity to stay consistent.";
+
+  if (!state.audioSegments.length) {
+    elements.audioSegmentsList.innerHTML = `
+      <div class="selection-summary audio-segments-empty">
+        No advanced audio boxes yet. Add one to start building a sequence.
+      </div>
+    `;
+    return;
+  }
+
+  elements.audioSegmentsList.innerHTML = state.audioSegments
+    .map((segment, index) => {
+      const segmentName = isSpeechAudio ? `Voice ${index + 1}` : `Sound ${index + 1}`;
+      const roleLabel = isSpeechAudio ? "Voice Name / Character Note" : "Layer Name / Sound Note";
+      const rolePlaceholder = isSpeechAudio
+        ? "Same name = same voice, like Narrator, Caller, Child, Robot"
+        : "Same name = same sound identity, like Rain Bed, Footsteps, Crowd, Thunder";
+      const literalLabel = isSpeechAudio ? "Words / Script" : "Words / Sounds";
+      const literalPlaceholder = isSpeechAudio
+        ? "Type the exact line to be spoken in this segment."
+        : "Type the exact sound cues or sound description for this segment.";
+      const timingMarkup = index === 0
+        ? `<div class="audio-segment-timing-note">This box starts first.</div>`
+        : `
+          <label class="setting-toggle audio-segment-timing-toggle">
+            <input
+              class="audio-segment-timing-input"
+              data-segment-index="${index}"
+              type="checkbox"
+              ${segment.same_time_as_previous ? "checked" : ""}
+            >
+            <span>Occurring at the same time as last box</span>
+          </label>
+          <div class="audio-segment-timing-note">${segment.same_time_as_previous ? "This box will start alongside the last box." : "This box will start after the last box ends."}</div>
+        `;
+
+      return `
+        <section class="audio-segment-card">
+          <div class="audio-segment-header">
+            <strong>${escapeHtml(segmentName)}</strong>
+            <button
+              class="audio-segment-remove"
+              data-segment-index="${index}"
+              type="button"
+              aria-label="Remove ${escapeHtml(segmentName)}"
+              title="Remove this box"
+            >×</button>
+          </div>
+          <label class="field-block compact-segment-field">
+            <span class="field-title">${escapeHtml(roleLabel)}</span>
+            <input
+              class="audio-segment-label-input"
+              data-segment-index="${index}"
+              type="text"
+              value="${escapeHtml(segment.label || "")}"
+              placeholder="${escapeHtml(rolePlaceholder)}"
+            >
+          </label>
+          <label class="field-block compact-segment-field">
+            <span class="field-title">${escapeHtml(literalLabel)}</span>
+            <textarea
+              class="audio-segment-literal-input"
+              data-segment-index="${index}"
+              rows="3"
+              placeholder="${escapeHtml(literalPlaceholder)}"
+            >${escapeHtml(segment.literal || "")}</textarea>
+          </label>
+          ${timingMarkup}
+        </section>
+      `;
+    })
+    .join("");
 }
 
 async function loadModels() {
@@ -300,7 +624,7 @@ async function loadModels() {
 async function loadAssets() {
   try {
     state.assets = await fetchJson("/api/assets");
-  } catch (error) {
+  } catch {
     state.assets = [];
   }
   reconcileAssignedAssets();
@@ -310,7 +634,7 @@ async function loadAssets() {
 async function loadOutputs() {
   try {
     state.outputs = await fetchJson("/api/outputs");
-  } catch (error) {
+  } catch {
     state.outputs = [];
   }
 
@@ -328,12 +652,19 @@ function renderStyleMode() {
   });
 
   const realism = state.generationStyle === "realism";
+  const selectedModel = getSelectedModel();
   elements.styleSummary.textContent = realism
-    ? "Realism uses a local stable-diffusion.cpp backend. Chatty-art builds sd-cli from diffuse_runtime/ on first use, then runs diffusion, GIF, and supported video jobs fully local."
+    ? (selectedModel && selectedModel.backend === "audio_runtime"
+        ? (selectedModel.supports_voice_output
+            ? "Realism speech uses a separate specialist audio-runtime lane. OuteTTS-style models focus on spoken voice output rather than image/video diffusion."
+            : "Realism soundscape audio uses a separate specialist audio-runtime lane. Stable Audio style packages focus on ambience, effects, and texture-driven clips rather than speech.")
+        : "Realism uses local specialist backends. Today that means stable-diffusion.cpp for image, GIF, and supported video jobs, with realism-audio families detected separately as they are wired.")
     : "Expressive uses the bundled llama.cpp planner plus Chatty-art's local renderer for fast image, GIF, and audio output.";
   renderRuntimeBadges();
+  refreshAudioSettingCopy();
 
   elements.negativePromptBlock.classList.toggle("hidden", !realism);
+  renderAudioPromptInputs();
   elements.temperatureCard.classList.toggle("muted-setting", realism);
   elements.temperatureInput.disabled = realism;
   elements.lowVramCard.classList.toggle("muted-setting", !realism);
@@ -345,6 +676,21 @@ function renderStyleMode() {
     ? "Helpful for realism jobs on GPUs that hit VRAM limits, especially higher resolutions and video. It is slower, but safer."
     : "Expressive mode does not use this. Realism mode can spill more work to CPU and tile VAE decode when this is enabled.";
   renderReferenceIntentControls();
+}
+
+function renderPromptWorkflowMode() {
+  const advanced = state.workflowMode === "advanced";
+
+  elements.workflowButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.workflow === state.workflowMode);
+  });
+
+  elements.workflowSummary.textContent = advanced
+    ? "Advanced shows Preview Handoff and future power-user controls before you lock in a generation."
+    : "Basic keeps the workflow simple. Advanced unlocks Preview Handoff and future power-user controls.";
+
+  elements.previewHandoffPanel.classList.toggle("hidden", !advanced);
+  renderAudioPromptInputs();
 }
 
 function renderRuntimeBadges() {
@@ -447,9 +793,12 @@ function renderModels() {
   const hiddenModeCount = state.models.length - visibleModels.length;
 
   if (!state.models.length) {
-    elements.modelSelect.innerHTML = `<option value="">No GGUF models found in models/</option>`;
+    elements.modelSelect.innerHTML = `<option value="">No local models found in models/</option>`;
     elements.modelSelect.disabled = true;
-    renderModelNotice("Drop one or more .gguf files into models/ and press Refresh Files.");
+    renderStyleMode();
+    renderModelNotice("Drop one or more GGUF models or supported local model packages into models/ and press Refresh Files.");
+    renderPrepareKindOptions();
+    renderPreparedHandoff();
     renderReferenceIntentControls();
     syncActionState();
     return;
@@ -459,11 +808,14 @@ function renderModels() {
     const label = state.generationStyle === "realism" ? "No realism models found" : "No expressive models found";
     elements.modelSelect.innerHTML = `<option value="">${label}</option>`;
     elements.modelSelect.disabled = true;
+    renderStyleMode();
     renderModelNotice(
       state.generationStyle === "realism"
-        ? "Realism mode needs diffusion-style GGUFs plus any companion weights they require in models/. Switch to Expressive to use regular llama.cpp models."
+        ? "Realism mode needs diffusion-style GGUFs or supported local model packages, plus any companion weights they require in models/. Switch to Expressive to use regular llama.cpp models."
         : "Expressive mode uses regular llama.cpp-compatible models. Switch to Realism for diffusion/video GGUFs."
     );
+    renderPrepareKindOptions();
+    renderPreparedHandoff();
     renderReferenceIntentControls();
     syncActionState();
     return;
@@ -482,7 +834,10 @@ function renderModels() {
     } else if (unsupportedModels.length) {
       elements.modelSelect.value = unsupportedModels[0].id;
     }
+    renderStyleMode();
     renderModelSummary(hiddenModeCount);
+    renderPrepareKindOptions();
+    renderPreparedHandoff();
     renderReferenceIntentControls();
     syncActionState();
     return;
@@ -494,22 +849,46 @@ function renderModels() {
     .join("");
   const unsupportedOptions = unsupportedModels.length
     ? `<optgroup label="Detected but not ready">${unsupportedModels
-        .map((model) => `<option value="" disabled>${escapeHtml(buildDropdownLabel(model))}</option>`)
+        .map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildDropdownLabel(model))}</option>`)
         .join("")}</optgroup>`
     : "";
 
   elements.modelSelect.innerHTML = `<optgroup label="Ready to run">${supportedOptions}</optgroup>${unsupportedOptions}`;
 
-  if (selected && supportedModels.some((model) => model.id === selected)) {
+  if (selected && visibleModels.some((model) => model.id === selected)) {
     elements.modelSelect.value = selected;
   } else {
     elements.modelSelect.value = supportedModels[0].id;
   }
 
   normalizeAssignedReferencesForCurrentModel();
+  renderStyleMode();
   renderModelSummary(hiddenModeCount);
+  renderPrepareKindOptions();
+  renderPreparedHandoff();
   renderReferenceIntentControls();
   syncActionState();
+}
+
+function renderPrepareKindOptions() {
+  const model = getSelectedModel();
+  const fallbackKinds = state.generationStyle === "realism"
+    ? ["image", "gif", "video"]
+    : ["image", "gif", "audio"];
+  const supportedKinds = model
+    ? ((model.supported_kinds || []).length ? model.supported_kinds : fallbackKinds)
+    : fallbackKinds;
+  const current = elements.prepareKindInput.value;
+
+  elements.prepareKindInput.innerHTML = supportedKinds
+    .map((kind) => `<option value="${escapeHtml(kind)}">${escapeHtml(formatKind(kind))}</option>`)
+    .join("");
+
+  if (supportedKinds.includes(current)) {
+    elements.prepareKindInput.value = current;
+  } else {
+    elements.prepareKindInput.value = supportedKinds[0] || "image";
+  }
 }
 
 function renderModelSummary(hiddenModeCount = null) {
@@ -535,6 +914,14 @@ function renderModelSummary(hiddenModeCount = null) {
 
   if ((model.supported_kinds || []).length) {
     badges.push(createModelBadge(`Outputs: ${formatKinds(model.supported_kinds)}`, "outputs"));
+  }
+  if ((model.supported_kinds || []).includes("audio")) {
+    badges.push(
+      createModelBadge(
+        model.supports_voice_output ? "Speech / Voice" : "Soundscape / SFX",
+        "reference"
+      )
+    );
   }
   if (model.requires_reference) {
     badges.push(createModelBadge("Reference required", "reference"));
@@ -569,6 +956,7 @@ function renderModelSummary(hiddenModeCount = null) {
       ${hiddenNote}
     </div>
   `;
+  refreshAudioSettingCopy();
 }
 
 function buildRecommendedLimitsMarkup(model) {
@@ -578,7 +966,17 @@ function buildRecommendedLimitsMarkup(model) {
   }
 
   const rows = (model.supported_kinds || [])
-    .map((kind) => buildKindRecommendation(model, kind, hardware))
+    .map((kind) => {
+      const recommendation = buildKindRecommendation(model, kind, hardware);
+      if (!recommendation) {
+        return null;
+      }
+
+      return {
+        ...recommendation,
+        current: assessCurrentKindPressure(model, kind, hardware),
+      };
+    })
     .filter(Boolean);
 
   if (!rows.length) {
@@ -599,11 +997,13 @@ function buildRecommendedLimitsMarkup(model) {
       </div>
       <div class="recommended-limits-list">
         ${rows.map((row) => `
-          <div class="recommended-limit-row">
+          <div class="recommended-limit-row current-${escapeHtml(row.current.tone)}">
             <strong>${escapeHtml(row.kind)}</strong>
             <span><em>Safe:</em> ${escapeHtml(row.safe)}</span>
             <span><em>Stretch:</em> ${escapeHtml(row.stretch)}</span>
             <span><em>Risky:</em> ${escapeHtml(row.risky)}</span>
+            <span class="recommended-current ${escapeHtml(`current-${row.current.tone}`)}"><em>Current:</em> ${escapeHtml(row.current.summary)} -> ${escapeHtml(row.current.label)}</span>
+            <span class="recommended-current-note">${escapeHtml(row.current.note)}</span>
           </div>
         `).join("")}
       </div>
@@ -614,11 +1014,11 @@ function buildRecommendedLimitsMarkup(model) {
 
 function buildKindRecommendation(model, kind, hardware) {
   const family = String(model.family || "").toLowerCase();
-  const name = String(model.name || "").toLowerCase();
   const dedicated = Number(hardware.dedicated_vram_gb || 0);
   const lowVram = Boolean(elements.lowVramInput.checked);
   const sizeHint = parseModelSizeHint(model.name);
   const isExpressive = model.backend === "llama_cpp";
+  const isAudioRuntime = model.backend === "audio_runtime";
   const isWan = family.includes("wan");
   const isFlux = family.includes("flux");
   const isDiffusion = model.backend === "stable_diffusion_cpp";
@@ -721,6 +1121,22 @@ function buildKindRecommendation(model, kind, hardware) {
   }
 
   if (kind === "audio") {
+    if (isAudioRuntime) {
+      if (model.supports_voice_output) {
+        return {
+          kind: "Audio",
+          safe: "Short to medium speech lines with the default voice",
+          stretch: "Longer narration or optional voice-reference cloning",
+          risky: "Very long passages mainly cost CPU/RAM time rather than VRAM, especially on local speech runtimes",
+        };
+      }
+      return {
+        kind: "Audio",
+        safe: "5s to 10s soundscape clips at the default steps",
+        stretch: "20s soundscape clips or higher steps",
+        risky: "Long ambience/SFX clips mainly become CPU/RAM heavy rather than GPU-VRAM heavy",
+      };
+    }
     return {
       kind: "Audio",
       safe: "Audio generation is not GPU-limited in the same way as realism video",
@@ -730,6 +1146,316 @@ function buildKindRecommendation(model, kind, hardware) {
   }
 
   return null;
+}
+
+function assessCurrentKindPressure(model, kind, hardware) {
+  const family = String(model.family || "").toLowerCase();
+  const dedicated = Math.max(1, Number(hardware.dedicated_vram_gb || 8));
+  const lowVram = state.generationStyle === "realism" && Boolean(elements.lowVramInput.checked);
+  const sizeHint = parseModelSizeHint(model.name);
+  const isExpressive = model.backend === "llama_cpp";
+  const isWan = family.includes("wan");
+  const isFlux = family.includes("flux");
+  const isAmd = /amd|radeon/i.test(String(hardware.gpu_label || ""));
+  const smallWan = isWan && sizeHint <= 20;
+  const current = currentSettingsForKind(model, kind);
+
+  if (!current) {
+    return {
+      tone: "safe",
+      label: "No current setting",
+      summary: "Unavailable",
+      note: "Select a supported output to see a live hardware assessment.",
+    };
+  }
+
+  if (kind === "audio") {
+    if (isExpressive) {
+      const promptWords = current.promptWords || 0;
+      if (promptWords <= 40) {
+        return {
+          tone: "safe",
+          label: "Comfortable",
+          summary: current.summary,
+          note: "Expressive audio is mostly planner time, not VRAM pressure, at this prompt length.",
+        };
+      }
+      if (promptWords <= 120) {
+        return {
+          tone: "stretch",
+          label: "Heavy but reasonable",
+          summary: current.summary,
+          note: "Longer expressive audio prompts mainly make the local planner slower rather than causing GPU OOMs.",
+        };
+      }
+      return {
+        tone: "risky",
+        label: "Very long prompt",
+        summary: current.summary,
+        note: "This is more likely to become a slow expressive-planning job than a hard hardware failure.",
+      };
+    }
+
+    const isSpeechAudio = model.backend === "audio_runtime" && model.supports_voice_output;
+    if (isSpeechAudio) {
+      const promptWords = current.promptWords || 0;
+      const hasVoiceReference = Boolean(state.primaryReference && state.primaryReference.kind === "audio");
+      if (promptWords <= 40 && !hasVoiceReference) {
+        return {
+          tone: "safe",
+          label: "Comfortable",
+          summary: current.summary,
+          note: "This speech request is well inside the easy local range. Prompt length matters more than VRAM here.",
+        };
+      }
+      if (promptWords <= 120) {
+        return {
+          tone: "stretch",
+          label: "Heavy but reasonable",
+          summary: current.summary,
+          note: hasVoiceReference
+            ? "Voice-reference cloning adds extra local runtime work, but this should still be reasonable."
+            : "Longer narration pushes runtime and memory, but it should still be manageable.",
+        };
+      }
+      return {
+        tone: "risky",
+        label: "Very long speech request",
+        summary: current.summary,
+        note: "Very long narration is more likely to feel slow or RAM-heavy than to trip a GPU OOM.",
+      };
+    }
+
+    const duration = current.audioDurationSeconds || 0;
+    const pressure = duration * Math.max(0.7, Number(elements.stepsInput.value || 24) / 24);
+    if (pressure <= 12) {
+      return {
+        tone: "safe",
+        label: "Comfortable",
+        summary: current.summary,
+        note: "This soundscape/audio length is comfortably inside the local Stable Audio range for this machine.",
+      };
+    }
+    if (pressure <= 24) {
+      return {
+        tone: "stretch",
+        label: "Heavy but reasonable",
+        summary: current.summary,
+        note: "Longer soundscape clips mainly push CPU and RAM time rather than dedicated VRAM on the current audio runtime.",
+      };
+    }
+    return {
+      tone: "risky",
+      label: "Long audio job",
+      summary: current.summary,
+      note: "This is more likely to be a very slow local audio render than a classic GPU OOM, but it is beyond the comfortable range.",
+    };
+  }
+
+  if (isExpressive) {
+    const hintedSize = parseModelSizeHint(model.name);
+    const sizeScale = hintedSize >= 9999 ? 1.0 : Math.max(0.6, hintedSize / 80);
+    const pressure = current.pixelScale * Math.max(1, current.frameCount / 16) * Math.max(0.7, sizeScale);
+    if (pressure <= 2.5) {
+      return {
+        tone: "safe",
+        label: "Comfortable",
+        summary: current.summary,
+        note: "Expressive mode is more likely to get slower than to hit a hard GPU memory wall.",
+      };
+    }
+    if (pressure <= 5.5) {
+      return {
+        tone: "stretch",
+        label: "Heavy but reasonable",
+        summary: current.summary,
+        note: "This should still run, but longer clips or higher steps may feel slow.",
+      };
+    }
+    return {
+      tone: "risky",
+      label: "Very heavy",
+      summary: current.summary,
+      note: "This is more likely to cost a lot of time than to hard-fail, but it is beyond the comfortable range for local expressive output.",
+    };
+  }
+
+  if (kind === "image") {
+    const familyScale = isWan ? 1.2 : isFlux ? 1.25 : 0.9;
+    const pressure = current.pixelScale * familyScale * (lowVram ? 0.88 : 1.0);
+    const safeThreshold = dedicated >= 12 ? 2.2 : dedicated >= 8 ? 1.5 : 1.1;
+    const stretchThreshold = dedicated >= 12 ? 3.8 : dedicated >= 8 ? 2.6 : 1.7;
+
+    if (pressure <= safeThreshold) {
+      return {
+        tone: "safe",
+        label: "Safe now",
+        summary: current.summary,
+        note: "This image size sits inside the comfortable range for the selected model on this hardware.",
+      };
+    }
+    if (pressure <= stretchThreshold) {
+      return {
+        tone: "stretch",
+        label: "Stretch",
+        summary: current.summary,
+        note: lowVram
+          ? "This is above the easy range, but Low VRAM mode is giving the runtime a safer decode path."
+          : "This is above the easy range. Low VRAM mode or a smaller still size would be safer.",
+      };
+    }
+    return {
+      tone: "risky",
+      label: "Likely OOM",
+      summary: current.summary,
+      note: "This image size is large enough that Vulkan decode can fail even when Windows still reports shared GPU memory available.",
+    };
+  }
+
+  const familyScale = isWan ? (smallWan ? 1.6 : 1.85) : isFlux ? 1.15 : 1.0;
+  const pressure =
+    current.pixelScale
+    * Math.max(1, current.frameCount / 16)
+    * familyScale
+    * (lowVram ? 0.82 : 1.0);
+  const safeThreshold = dedicated >= 12 ? 1.6 : dedicated >= 8 ? 1.0 : 0.75;
+  const stretchThreshold = dedicated >= 12 ? 3.0 : dedicated >= 8 ? 2.0 : 1.25;
+  const frameStress = current.frameCount > 80;
+  const resolutionStress = current.maxDimension >= 768;
+  const baseNote = isAmd
+    ? "On AMD/Windows, shared GPU memory can be in use and Task Manager can still look roomy while Vulkan fails one large contiguous allocation."
+    : "Shared GPU memory can help a little, but Vulkan video jobs still fail when a single large allocation cannot be satisfied.";
+
+  if (pressure <= safeThreshold) {
+    return {
+      tone: "safe",
+      label: "Safe now",
+      summary: current.summary,
+      note: "This clip sits inside the comfortable range for the selected model on this hardware.",
+    };
+  }
+  if (pressure <= stretchThreshold) {
+    return {
+      tone: "stretch",
+      label: "Stretch",
+      summary: current.summary,
+      note: lowVram
+        ? "Low VRAM mode is helping here, but clip length and resolution are already pushing past the easy range."
+        : "This should be treated as a stretch setting. Low VRAM mode and a shorter clip would be safer.",
+    };
+  }
+  return {
+    tone: "risky",
+    label: "Likely OOM",
+    summary: current.summary,
+    note: frameStress
+      ? `Frame count is the biggest multiplier here. ${baseNote}`
+      : resolutionStress
+      ? `Resolution is the biggest multiplier here. ${baseNote}`
+      : baseNote,
+  };
+}
+
+function currentSettingsForKind(model, kind) {
+  if (kind === "gif" || kind === "video") {
+    const resolution = elements.videoResolutionInput;
+    const summary = `${selectedOptionLabel(resolution)} | ${elements.videoDurationInput.value}s | ${elements.videoFpsInput.value} FPS (${currentVideoFrameCount()} frames)`;
+    const [width, height] = parseDimensionPair(resolution.value);
+    return {
+      summary,
+      width,
+      height,
+      pixelScale: Math.max(0.25, (width * height) / (512 * 512)),
+      maxDimension: Math.max(width, height),
+      frameCount: currentVideoFrameCount(),
+    };
+  }
+
+  if (kind === "audio") {
+    const promptWords = Math.max(1, elements.promptInput.value.trim().split(/\s+/).filter(Boolean).length);
+    const audioDurationSeconds = Math.max(1, Number(elements.audioDurationInput.value || 0));
+    if (model?.backend === "llama_cpp") {
+      return {
+        summary: `${promptWords} words | ${elements.stepsInput.value} steps | temp ${elements.temperatureInput.value}`,
+        width: 1,
+        height: 1,
+        pixelScale: 1,
+        maxDimension: 1,
+        frameCount: 1,
+        promptWords,
+        audioDurationSeconds,
+      };
+    }
+    if (model?.backend === "audio_runtime" && model.supports_voice_output) {
+      return {
+        summary: `${promptWords} words | ${elements.stepsInput.value} steps${state.primaryReference?.kind === "audio" ? " | voice reference" : ""}`,
+        width: 1,
+        height: 1,
+        pixelScale: 1,
+        maxDimension: 1,
+        frameCount: 1,
+        promptWords,
+        audioDurationSeconds,
+      };
+    }
+    return {
+      summary: `${audioDurationSeconds}s audio | ${elements.stepsInput.value} steps | CFG ${elements.cfgInput.value}`,
+      width: 1,
+      height: 1,
+      pixelScale: 1,
+      maxDimension: 1,
+      frameCount: 1,
+      promptWords,
+      audioDurationSeconds,
+    };
+  }
+
+  if (kind === "image") {
+    const resolution = elements.resolutionInput;
+    const summary = `${selectedOptionLabel(resolution)} | ${elements.stepsInput.value} steps`;
+    const [width, height] = parseDimensionPair(resolution.value);
+    return {
+      summary,
+      width,
+      height,
+      pixelScale: Math.max(0.35, (width * height) / (512 * 512)),
+      maxDimension: Math.max(width, height),
+      frameCount: 1,
+    };
+  }
+
+  return null;
+}
+
+function currentVideoFrameCount() {
+  const seconds = Math.max(1, Number(elements.videoDurationInput.value || 0));
+  const fps = Math.max(1, Number(elements.videoFpsInput.value || 0));
+  return seconds * fps;
+}
+
+function selectedOptionLabel(select) {
+  return select.options[select.selectedIndex]?.text || select.value;
+}
+
+function parseDimensionPair(value) {
+  switch (value) {
+    case "square256":
+      return [256, 256];
+    case "square512":
+      return [512, 512];
+    case "square768":
+      return [768, 768];
+    case "landscape720":
+      return [1280, 720];
+    case "portrait768":
+      return [768, 1024];
+    case "landscape1024":
+      return [1024, 768];
+    case "poster1024":
+      return [1024, 1280];
+    default:
+      return [512, 512];
+  }
 }
 
 function parseModelSizeHint(name) {
@@ -946,7 +1672,8 @@ function renderPreview() {
       ${item.reference_asset ? `<p><strong>Reference use:</strong> ${escapeHtml(referenceIntentLabel(item.reference_intent || "guide"))} via ${escapeHtml(item.reference_asset)}</p>` : ""}
       ${item.end_reference_asset ? `<p><strong>End frame:</strong> ${escapeHtml(item.end_reference_asset)}</p>` : ""}
       ${item.control_reference_asset ? `<p><strong>Control video:</strong> ${escapeHtml(item.control_reference_asset)}</p>` : ""}
-      ${item.compiled_prompt ? `<p><strong>Compiled brief:</strong> ${escapeHtml(item.compiled_prompt)}</p>` : ""}
+      ${item.spoken_text ? `<p><strong>Spoken text:</strong> ${escapeHtml(item.spoken_text)}</p>` : ""}
+      ${item.compiled_prompt ? `<p><strong>${item.spoken_text ? "Speech direction:" : "Compiled brief:"}</strong> ${escapeHtml(item.compiled_prompt)}</p>` : ""}
       ${item.prompt_assist && item.prompt_assist !== "off" ? `<p><strong>Prompt Assist:</strong> ${escapeHtml(item.prompt_assist)}${item.interpreter_model ? ` via ${escapeHtml(item.interpreter_model)}` : ""}</p>` : ""}
       <p>${escapeHtml(item.note || "")}</p>
     </div>
@@ -1049,6 +1776,7 @@ function assignSelectedReference(slot, intent = state.referenceIntent) {
     state.controlReference = state.selectedReference;
   }
 
+  clearPreparedHandoff();
   renderReferenceIntentControls();
   renderTrayPreview();
   syncActionState();
@@ -1063,6 +1791,7 @@ function clearReferenceSlot(slot) {
     state.controlReference = null;
   }
 
+  clearPreparedHandoff();
   renderReferenceIntentControls();
   renderTrayPreview();
   syncActionState();
@@ -1072,6 +1801,7 @@ function clearReferenceSlots() {
   state.primaryReference = null;
   state.endReference = null;
   state.controlReference = null;
+  clearPreparedHandoff();
   renderReferenceIntentControls();
   renderTrayPreview();
   syncActionState();
@@ -1161,15 +1891,23 @@ function toggleColumn(column, open) {
 function syncActionState() {
   const model = getSelectedModel();
   const assignedReferencesValid = areAssignedReferencesCompatible(model);
+  const prepareKind = elements.prepareKindInput.value;
+  const prepareSupported = model && model.runtime_supported && kindSupported(model, prepareKind);
+  const advanced = state.workflowMode === "advanced";
+  elements.prepareRequestButton.disabled = !advanced || state.preparing || state.generating || !prepareSupported || !assignedReferencesValid;
+  elements.clearPreparedButton.disabled = !advanced || !state.preparedHandoff;
   elements.actionButtons.forEach((button) => {
     const supported = model && model.runtime_supported && kindSupported(model, button.dataset.kind);
-    button.disabled = state.generating || !supported || !assignedReferencesValid;
+    button.disabled = state.generating || state.preparing || !supported || !assignedReferencesValid;
   });
 }
 
 function buildAcceptedMessage(model, kind) {
   const assistMode = elements.promptAssistInput.value;
-  const assistNote = assistMode === "off"
+  const usingPreparedHandoff = state.preparedHandoff && state.preparedHandoff.kind === kind;
+  const assistNote = usingPreparedHandoff
+    ? " Preview Handoff was locked in for this run."
+    : assistMode === "off"
     ? ""
     : ` Prompt Assist (${assistMode}) will compile a richer local brief first.`;
   const kindLabel = formatKind(kind).toLowerCase();
@@ -1185,6 +1923,244 @@ function buildAcceptedMessage(model, kind) {
   }
 
   return `Job accepted. Starting local planning for ${kindLabel}. The first progress update may take a few seconds.${assistNote}`;
+}
+
+function clearPreparedHandoff() {
+  if (!state.preparedHandoff) {
+    renderPreparedHandoff();
+    syncActionState();
+    return;
+  }
+
+  state.preparedHandoff = null;
+  renderPreparedHandoff();
+  syncActionState();
+}
+
+function renderPreparedHandoff() {
+  const handoff = state.preparedHandoff;
+  if (!handoff) {
+    elements.preparedEmpty.classList.remove("hidden");
+    elements.preparedPanel.classList.add("hidden");
+    elements.preparedMetaChips.innerHTML = "";
+    elements.preparedNote.textContent = "";
+    elements.preparedPromptTitle.textContent = "Prepared Prompt";
+    elements.preparedPromptInput.value = "";
+    elements.preparedPromptInput.placeholder = "The compiled handoff prompt will appear here after Preview Handoff runs.";
+    elements.preparedSpokenBlock.classList.add("hidden");
+    elements.preparedSpokenInput.value = "";
+    elements.preparedNegativeBlock.classList.remove("hidden");
+    elements.preparedNegativeInput.value = "";
+    elements.preparedEstimate.innerHTML = "";
+    elements.preparedFocusTags.innerHTML = "";
+    elements.preparedAssumptions.textContent = "";
+    return;
+  }
+
+  const isSpeechAudio = handoff.kind === "audio" && handoff.supports_voice_output;
+  const isSoundAudio = handoff.kind === "audio" && !handoff.supports_voice_output;
+  elements.preparedEmpty.classList.add("hidden");
+  elements.preparedPanel.classList.remove("hidden");
+  elements.preparedPromptTitle.textContent = isSpeechAudio
+    ? "Speech Direction"
+    : isSoundAudio
+      ? "Prepared Description"
+      : "Prepared Prompt";
+  elements.preparedPromptInput.placeholder = isSpeechAudio
+    ? "Optional delivery direction, tone, pacing, or voice feel. This field is not spoken aloud."
+    : isSoundAudio
+      ? "Only the descriptive sound direction appears here. Your Words / Sounds boxes stay separate and verbatim."
+      : "The compiled handoff prompt will appear here after Preview Handoff runs.";
+  elements.preparedPromptInput.value = handoff.prepared_prompt || "";
+  elements.preparedSpokenBlock.classList.toggle("hidden", !isSpeechAudio);
+  elements.preparedSpokenInput.value = handoff.prepared_spoken_text || "";
+  elements.preparedNegativeBlock.classList.toggle("hidden", isSpeechAudio);
+  elements.preparedNegativeInput.value = handoff.effective_negative_prompt || "";
+
+  const chips = [
+    createPreparedChip(`For ${formatKind(handoff.kind)}`),
+    createPreparedChip(handoff.resolution_label || "Current settings"),
+    createPreparedChip(`Estimate ${formatDurationRange(handoff.estimated_time)}`),
+    handoff.interpreter_model ? createPreparedChip(`Interpreter ${handoff.interpreter_model}`) : "",
+    handoff.used_original_prompt ? createPreparedChip("Using original wording") : "",
+    isSpeechAudio ? createPreparedChip("Speech handoff") : "",
+    isSoundAudio ? createPreparedChip("Literal sound lane kept separate") : "",
+  ].filter(Boolean);
+  elements.preparedMetaChips.innerHTML = chips.join("");
+
+  const noteParts = [
+    handoff.note,
+    handoff.reference_note,
+    handoff.hardware_note,
+  ].filter(Boolean);
+  elements.preparedNote.textContent = noteParts.join(" ");
+
+  const estimateParts = [
+    `<strong>${escapeHtml(formatDurationRange(handoff.estimated_time))}</strong>`,
+    `<span>${escapeHtml(handoff.estimated_time.note || "")}</span>`,
+    handoff.estimated_frames
+      ? `<span>${escapeHtml(`${handoff.estimated_frames} frame(s) estimated for this ${formatKind(handoff.kind).toLowerCase()} run.`)}</span>`
+      : "",
+    `<span>${escapeHtml(`Confidence: ${formatEstimateConfidence(handoff.estimated_time.confidence)}.`)}</span>`,
+  ].filter(Boolean);
+  elements.preparedEstimate.innerHTML = estimateParts.join("");
+
+  elements.preparedFocusTags.innerHTML = (handoff.focus_tags || []).length
+    ? handoff.focus_tags.map((tag) => createPreparedChip(tag)).join("")
+    : `<span class="prepared-copy">No extra focus cues were added.</span>`;
+  elements.preparedAssumptions.textContent = (handoff.assumptions || []).length
+    ? handoff.assumptions.join(" | ")
+    : "No assumptions were needed for this handoff.";
+}
+
+function createPreparedChip(label) {
+  return `<span class="prepared-chip">${escapeHtml(label)}</span>`;
+}
+
+function formatDurationRange(estimate) {
+  const min = Number(estimate?.min_seconds || 0);
+  const max = Number(estimate?.max_seconds || 0);
+  if (!min && !max) {
+    return "Unknown time";
+  }
+  return `${formatSeconds(min)} to ${formatSeconds(Math.max(min, max))}`;
+}
+
+function formatSeconds(totalSeconds) {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes <= 0) {
+    return `${remainder}s`;
+  }
+  if (remainder === 0) {
+    return `${minutes}m`;
+  }
+  return `${minutes}m ${remainder}s`;
+}
+
+function formatEstimateConfidence(confidence) {
+  if (confidence === "high") return "high";
+  if (confidence === "medium") return "medium";
+  return "low";
+}
+
+function buildBasePayload(kind) {
+  const model = getSelectedModel();
+  const prompt = elements.promptInput.value.trim();
+  const negativePrompt = elements.negativePromptInput.value.trim();
+  const audioLiteralPrompt = elements.audioLiteralPromptInput.value.trim();
+  const includeAudioLiteral =
+    kind === "audio"
+    && model
+    && model.backend === "audio_runtime";
+  const audioSegments = includeAudioLiteral && state.workflowMode === "advanced"
+    ? getNormalizedAudioSegments()
+    : [];
+  return {
+    prompt,
+    negative_prompt: negativePrompt ? negativePrompt : null,
+    audio_literal_prompt:
+      includeAudioLiteral && !audioSegments.length && audioLiteralPrompt ? audioLiteralPrompt : null,
+    audio_segments: audioSegments,
+    prompt_assist: elements.promptAssistInput.value,
+    model: model.id,
+    kind,
+    style: state.generationStyle,
+    settings: {
+      temperature: Number(elements.temperatureInput.value),
+      steps: Number(elements.stepsInput.value),
+      cfg_scale: Number(elements.cfgInput.value),
+      resolution: elements.resolutionInput.value,
+      video_resolution: elements.videoResolutionInput.value,
+      video_duration_seconds: Number(elements.videoDurationInput.value),
+      video_fps: Number(elements.videoFpsInput.value),
+      audio_duration_seconds: Number(elements.audioDurationInput.value),
+      low_vram_mode: state.generationStyle === "realism" && elements.lowVramInput.checked,
+      seed: null,
+    },
+    reference_asset: state.primaryReference ? state.primaryReference.id : null,
+    reference_intent: state.referenceIntent,
+    end_reference_asset: state.endReference ? state.endReference.id : null,
+    control_reference_asset: state.controlReference ? state.controlReference.id : null,
+    prepared_prompt: null,
+    prepared_negative_prompt: null,
+    prepared_note: null,
+    prepared_interpreter_model: null,
+    prepared_spoken_text: null,
+  };
+}
+
+async function prepareGenerationRequest() {
+  const model = getSelectedModel();
+  const kind = elements.prepareKindInput.value;
+
+  if (!model) {
+    setProgress(0, "Model", `Choose a ${state.generationStyle} model first.`);
+    return;
+  }
+
+  if (!kindSupported(model, kind)) {
+    setProgress(0, "Mode", `${model.name} does not currently support ${kind} generation in ${state.generationStyle} mode.`);
+    return;
+  }
+
+  if (!areAssignedReferencesCompatible(model)) {
+    setProgress(0, "Reference", getAssignedReferenceValidationMessage(model));
+    return;
+  }
+
+  const prompt = elements.promptInput.value.trim();
+  const audioLiteralPrompt = elements.audioLiteralPromptInput.value.trim();
+  const canUseAudioLiteral = model.backend === "audio_runtime" && kind === "audio";
+  const audioSegments = canUseAudioLiteral && state.workflowMode === "advanced"
+    ? getNormalizedAudioSegments()
+    : [];
+  if (!prompt && !(canUseAudioLiteral && (audioLiteralPrompt || audioSegments.length))) {
+    setProgress(0, "Prompt", "Type a prompt or fill in the audio Words / Script / Sounds area first.");
+    elements.promptInput.focus();
+    return;
+  }
+
+  let seed = null;
+  try {
+    seed = parseSeedInput();
+  } catch (error) {
+    setProgress(0, "Seed", error.message);
+    elements.seedInput.focus();
+    return;
+  }
+
+  const payload = buildBasePayload(kind);
+  payload.settings.seed = seed;
+
+  state.preparing = true;
+  syncActionState();
+  setProgress(0.06, "Previewing", `Preparing a handoff preview for ${formatKind(kind).toLowerCase()} generation.`);
+
+  try {
+    const response = await fetch("/api/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || "Preview Handoff failed.");
+    }
+
+    state.preparedHandoff = await response.json();
+    renderPreparedHandoff();
+    setProgress(0.12, "Preview Ready", `Preview Handoff is ready for ${formatKind(kind).toLowerCase()} generation. Review and edit it before you lock in.`);
+  } catch (error) {
+    state.preparedHandoff = null;
+    renderPreparedHandoff();
+    setProgress(0, "Error", error.message || "Preview Handoff failed.");
+  } finally {
+    state.preparing = false;
+    syncActionState();
+  }
 }
 
 async function submitGeneration(kind) {
@@ -1206,11 +2182,20 @@ async function submitGeneration(kind) {
   }
 
   const prompt = elements.promptInput.value.trim();
-  if (!prompt) {
-    setProgress(0, "Prompt", "Type a prompt first.");
+  const audioLiteralPrompt = elements.audioLiteralPromptInput.value.trim();
+  const canUseAudioLiteral = model.backend === "audio_runtime" && kind === "audio";
+  const audioSegments = canUseAudioLiteral && state.workflowMode === "advanced"
+    ? getNormalizedAudioSegments()
+    : [];
+  if (!prompt && !(canUseAudioLiteral && (audioLiteralPrompt || audioSegments.length))) {
+    setProgress(0, "Prompt", "Type a prompt or fill in the audio Words / Script / Sounds area first.");
     elements.promptInput.focus();
     return;
   }
+
+  const currentRisk = state.hardwareProfile
+    ? assessCurrentKindPressure(model, kind, state.hardwareProfile)
+    : null;
 
   state.generating = true;
   syncActionState();
@@ -1218,7 +2203,7 @@ async function submitGeneration(kind) {
     0.04,
     "Queued",
     state.generationStyle === "realism"
-      ? `Submitting ${kind} job to the local stable-diffusion.cpp realism backend.`
+      ? `Submitting ${kind} job to the local stable-diffusion.cpp realism backend.${currentRisk?.tone === "risky" ? ` Warning: ${currentRisk.note}` : ""}`
       : `Submitting ${kind} job to the bundled expressive backend.`
   );
 
@@ -1233,30 +2218,18 @@ async function submitGeneration(kind) {
     return;
   }
 
-  const negativePrompt = elements.negativePromptInput.value.trim();
-  const payload = {
-    prompt,
-    negative_prompt: negativePrompt ? negativePrompt : null,
-    prompt_assist: elements.promptAssistInput.value,
-    model: model.id,
-    kind,
-    style: state.generationStyle,
-      settings: {
-        temperature: Number(elements.temperatureInput.value),
-        steps: Number(elements.stepsInput.value),
-        cfg_scale: Number(elements.cfgInput.value),
-        resolution: elements.resolutionInput.value,
-        video_resolution: elements.videoResolutionInput.value,
-        video_duration_seconds: Number(elements.videoDurationInput.value),
-        video_fps: Number(elements.videoFpsInput.value),
-        low_vram_mode: state.generationStyle === "realism" && elements.lowVramInput.checked,
-        seed,
-      },
-    reference_asset: state.primaryReference ? state.primaryReference.id : null,
-    reference_intent: state.referenceIntent,
-    end_reference_asset: state.endReference ? state.endReference.id : null,
-    control_reference_asset: state.controlReference ? state.controlReference.id : null,
-  };
+  const payload = buildBasePayload(kind);
+  payload.settings.seed = seed;
+  if (state.preparedHandoff && state.preparedHandoff.kind === kind) {
+    const preparedPrompt = elements.preparedPromptInput.value.trim();
+    payload.prepared_prompt = preparedPrompt ? preparedPrompt : null;
+    const preparedNegative = elements.preparedNegativeInput.value.trim();
+    payload.prepared_negative_prompt = preparedNegative ? preparedNegative : null;
+    const preparedSpokenText = elements.preparedSpokenInput.value.trim();
+    payload.prepared_spoken_text = preparedSpokenText ? preparedSpokenText : null;
+    payload.prepared_note = state.preparedHandoff.note || "Preview Handoff was reviewed before generation.";
+    payload.prepared_interpreter_model = state.preparedHandoff.interpreter_model || null;
+  }
 
   try {
     const response = await fetch("/api/generate", {
@@ -1615,13 +2588,9 @@ function formatKinds(kinds) {
   return labels.length ? labels.join(", ") : "No direct outputs";
 }
 
-function formatBackend(backend) {
-  if (backend === "stable_diffusion_cpp") return "stable-diffusion.cpp realism";
-  return "llama.cpp expressive";
-}
-
 function formatBackendBadge(backend) {
   if (backend === "stable_diffusion_cpp") return "stable-diffusion.cpp";
+  if (backend === "audio_runtime") return "audio runtime";
   return "llama.cpp";
 }
 

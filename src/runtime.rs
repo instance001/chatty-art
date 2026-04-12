@@ -54,11 +54,14 @@ pub struct PromptAssistBrief {
     pub negative_prompt: String,
     pub assumptions: Vec<String>,
     pub focus_tags: Vec<String>,
+    #[serde(default)]
+    pub spoken_text: Option<String>,
 }
 
 pub struct CompiledPrompt {
     pub prompt: String,
     pub negative_prompt: Option<String>,
+    pub spoken_text: Option<String>,
     pub note: String,
     pub brief: PromptAssistBrief,
     pub trace: PlannerTrace,
@@ -188,9 +191,10 @@ pub async fn compile_prompt(
     kind: MediaKind,
     mode: PromptAssistMode,
     reference: Option<&ReferenceSummary>,
+    supports_voice_output: bool,
     seed: u32,
 ) -> Result<CompiledPrompt> {
-    let schema = prompt_assist_schema();
+    let schema = prompt_assist_schema(kind, supports_voice_output);
     let prompt = prompt_assist_prompt(
         user_prompt,
         user_negative_prompt,
@@ -198,6 +202,7 @@ pub async fn compile_prompt(
         kind,
         mode,
         reference,
+        supports_voice_output,
     );
     let max_tokens = match mode {
         PromptAssistMode::Off => 0,
@@ -221,24 +226,35 @@ pub async fn compile_prompt(
     {
         Ok(invoked) => {
             let brief = normalize_prompt_assist_brief(invoked.value);
-            let compiled_prompt = if brief.expanded_prompt.trim().is_empty() {
+            let spoken_text = if kind == MediaKind::Audio && supports_voice_output {
+                brief
+                    .spoken_text
+                    .as_deref()
+                    .and_then(optional_text)
+                    .map(str::to_string)
+                    .or_else(|| Some(derive_spoken_text_heuristic(user_prompt)))
+            } else {
+                None
+            };
+            let compiled_prompt = if kind == MediaKind::Audio && supports_voice_output {
+                optional_text(&brief.expanded_prompt)
+                    .map(|value| polish_compiled_prompt(value, &brief.focus_tags, style, kind))
+                    .or_else(|| {
+                        derive_speech_direction_heuristic(user_prompt, spoken_text.as_deref())
+                    })
+                    .unwrap_or_default()
+            } else if brief.expanded_prompt.trim().is_empty() {
                 user_prompt.trim().to_string()
             } else {
-                polish_compiled_prompt(
-                    &brief.expanded_prompt,
-                    &brief.focus_tags,
-                    style,
-                    kind,
-                )
+                polish_compiled_prompt(&brief.expanded_prompt, &brief.focus_tags, style, kind)
             };
-            let negative_prompt = merge_negative_prompts(
-                user_negative_prompt,
-                optional_text(&brief.negative_prompt),
-            );
+            let negative_prompt =
+                merge_negative_prompts(user_negative_prompt, optional_text(&brief.negative_prompt));
             Ok(CompiledPrompt {
                 prompt: compiled_prompt,
                 negative_prompt,
-                note: prompt_assist_note(mode, &brief),
+                spoken_text,
+                note: prompt_assist_note(mode, &brief, kind, supports_voice_output),
                 brief,
                 trace: PlannerTrace {
                     used_fallback: false,
@@ -253,28 +269,43 @@ pub async fn compile_prompt(
             raw_output,
             stderr,
             extracted_json,
-        }) => Ok(CompiledPrompt {
-            prompt: user_prompt.trim().to_string(),
-            negative_prompt: user_negative_prompt
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-            note: "Prompt Assist could not extract a clean brief, so Chatty-art used your original prompt."
-                .to_string(),
-            brief: PromptAssistBrief {
-                expanded_prompt: user_prompt.trim().to_string(),
-                negative_prompt: user_negative_prompt.unwrap_or_default().trim().to_string(),
-                assumptions: Vec::new(),
-                focus_tags: Vec::new(),
-            },
-            trace: PlannerTrace {
-                used_fallback: true,
-                raw_output,
-                stderr,
-                extracted_json,
-            },
-            used_original_prompt: true,
-        }),
+        }) => {
+            let spoken_text = if kind == MediaKind::Audio && supports_voice_output {
+                Some(derive_spoken_text_heuristic(user_prompt))
+            } else {
+                None
+            };
+            let fallback_prompt = if kind == MediaKind::Audio && supports_voice_output {
+                derive_speech_direction_heuristic(user_prompt, spoken_text.as_deref())
+                    .unwrap_or_default()
+            } else {
+                user_prompt.trim().to_string()
+            };
+            Ok(CompiledPrompt {
+                prompt: fallback_prompt.clone(),
+                negative_prompt: user_negative_prompt
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+                spoken_text: spoken_text.clone(),
+                note: "Prompt Assist could not extract a clean brief, so Chatty-art fell back to a simpler local handoff."
+                    .to_string(),
+                brief: PromptAssistBrief {
+                    expanded_prompt: fallback_prompt,
+                    negative_prompt: user_negative_prompt.unwrap_or_default().trim().to_string(),
+                    assumptions: Vec::new(),
+                    focus_tags: Vec::new(),
+                    spoken_text,
+                },
+                trace: PlannerTrace {
+                    used_fallback: true,
+                    raw_output,
+                    stderr,
+                    extracted_json,
+                },
+                used_original_prompt: true,
+            })
+        }
         Err(InvokeError::Runtime(error)) => Err(error),
     }
 }
@@ -678,7 +709,30 @@ fn extract_json_object(output: &str) -> Option<String> {
     None
 }
 
-fn prompt_assist_schema() -> Value {
+fn prompt_assist_schema(kind: MediaKind, supports_voice_output: bool) -> Value {
+    if kind == MediaKind::Audio && supports_voice_output {
+        return json!({
+            "type": "object",
+            "properties": {
+                "expanded_prompt": { "type": "string" },
+                "spoken_text": { "type": "string" },
+                "negative_prompt": { "type": "string" },
+                "assumptions": {
+                    "type": "array",
+                    "maxItems": 6,
+                    "items": { "type": "string" }
+                },
+                "focus_tags": {
+                    "type": "array",
+                    "maxItems": 10,
+                    "items": { "type": "string" }
+                }
+            },
+            "required": ["expanded_prompt", "spoken_text", "negative_prompt", "assumptions", "focus_tags"],
+            "additionalProperties": false
+        });
+    }
+
     json!({
         "type": "object",
         "properties": {
@@ -943,13 +997,24 @@ fn prompt_assist_prompt(
     kind: MediaKind,
     mode: PromptAssistMode,
     reference: Option<&ReferenceSummary>,
+    supports_voice_output: bool,
 ) -> String {
+    if kind == MediaKind::Audio && supports_voice_output {
+        return format!(
+            "You are Prompt Assist for a local speech generation tool.\nReturn only JSON matching the schema.\nSeparate the request into two different lanes.\nspoken_text: only the exact words that should be spoken aloud.\nexpanded_prompt: delivery direction only, such as tone, pacing, accent, age, gender, emotion, microphone feel, pauses, or emphasis.\nDo not include the spoken words inside expanded_prompt.\nIf the user supplied quoted dialogue or an explicit script, preserve that wording closely in spoken_text.\nIf the user described the kind of line they want but did not supply exact wording, write a short natural line that fulfills the request.\nKeep spoken_text concise and human-sounding.\nThe negative_prompt should be a concise comma-separated list of speech problems to avoid, or an empty string if not needed.\nfocus_tags should be short speech-direction cues.\nAssist strength: {}.\nReference: {}.\nOriginal negative prompt: {}.\nOriginal user prompt: {}",
+            prompt_assist_strength(mode),
+            reference_summary(reference),
+            user_negative_prompt.unwrap_or("None."),
+            user_prompt.trim()
+        );
+    }
+
     format!(
         "You are Prompt Assist for a local creative generation tool.\nReturn only JSON matching the schema.\nExpand short human prompts into a compact generator-ready brief.\nWrite the expanded_prompt as direct descriptive cue phrases, not as a conversation, analysis, explanation, or story.\nUse concrete subject, setting, composition, camera/framing, lighting, texture, color, atmosphere, motion, and quality cues when relevant.\nPrefer dense comma-separated or clause-separated descriptors over chatty sentences.\nDo not mention the user, what they did or did not specify, or your own reasoning.\nDo not contradict explicit user details.\nOnly fill in omitted details with reasonable defaults.\nIf the user leaves something open, choose common, low-risk defaults instead of something bizarre.\nDo not invent unusual anatomy, anthropomorphic behavior, extra limbs, impossible poses, or extra subjects unless the user clearly asked for them.\nIf the subject is an animal, keep it in a normal natural pose unless told otherwise.\nThe negative_prompt should be a concise comma-separated artifact-avoidance list, not a sentence.\nfocus_tags should be short generator-friendly cue tags.\nAssist strength: {}.\nTarget mode: {}.\nTarget media: {}.\nMedia guidance: {}.\nReference: {}.\nOriginal negative prompt: {}.\nOriginal user prompt: {}",
         prompt_assist_strength(mode),
         generation_style_label(style),
         kind.as_str(),
-        prompt_assist_media_guidance(kind, style),
+        prompt_assist_media_guidance(kind, style, supports_voice_output),
         reference_summary(reference),
         user_negative_prompt.unwrap_or("None."),
         user_prompt.trim()
@@ -1043,7 +1108,11 @@ fn generation_style_label(style: GenerationStyle) -> &'static str {
     }
 }
 
-fn prompt_assist_media_guidance(kind: MediaKind, style: GenerationStyle) -> &'static str {
+fn prompt_assist_media_guidance(
+    kind: MediaKind,
+    style: GenerationStyle,
+    supports_voice_output: bool,
+) -> &'static str {
     match (kind, style) {
         (MediaKind::Image, GenerationStyle::Expressive) => {
             "Use concise scene-brief cues for subject, setting, layout, silhouette, palette, lighting, depth, and a few strong visual motifs that an artist-planner can translate into stylized composition."
@@ -1062,6 +1131,9 @@ fn prompt_assist_media_guidance(kind: MediaKind, style: GenerationStyle) -> &'st
         }
         (MediaKind::Video, GenerationStyle::Realism) => {
             "Use concrete video-generation cues: subject, setting, motion, camera feel, temporal consistency, continuity, and clean subject anatomy across frames."
+        }
+        (MediaKind::Audio, _) if supports_voice_output => {
+            "Separate the spoken script from the delivery direction. Preserve quoted dialogue closely, and keep delivery cues in a separate compact direction brief."
         }
         (MediaKind::Audio, _) => {
             "Describe mood, instrumentation, tempo, rhythm, texture, ambience, and how the sound should evolve over a short loop."
@@ -1095,10 +1167,15 @@ fn reference_summary(reference: Option<&ReferenceSummary>) -> String {
         .unwrap_or_else(|| "No reference asset selected.".to_string())
 }
 
-fn prompt_assist_note(mode: PromptAssistMode, brief: &PromptAssistBrief) -> String {
+fn prompt_assist_note(
+    mode: PromptAssistMode,
+    brief: &PromptAssistBrief,
+    kind: MediaKind,
+    supports_voice_output: bool,
+) -> String {
     let assumption_count = brief.assumptions.len();
     let focus_count = brief.focus_tags.len();
-    match mode {
+    let base = match mode {
         PromptAssistMode::Off => String::new(),
         PromptAssistMode::Gentle => format!(
             "Prompt Assist (gentle) expanded the prompt with {assumption_count} assumption(s) and {focus_count} focus cue(s)."
@@ -1106,12 +1183,195 @@ fn prompt_assist_note(mode: PromptAssistMode, brief: &PromptAssistBrief) -> Stri
         PromptAssistMode::Strong => format!(
             "Prompt Assist (strong) expanded the prompt with {assumption_count} assumption(s) and {focus_count} focus cue(s)."
         ),
+    };
+
+    if kind == MediaKind::Audio && supports_voice_output && !base.is_empty() {
+        format!(
+            "{base} Chatty-art also separated the spoken words from the delivery direction so the whole request is not read aloud verbatim."
+        )
+    } else {
+        base
     }
+}
+
+pub fn derive_spoken_text_heuristic(user_prompt: &str) -> String {
+    let prompt = user_prompt.trim();
+    if prompt.is_empty() {
+        return String::new();
+    }
+
+    if let Some(quoted) = extract_quoted_spoken_text(prompt) {
+        return quoted;
+    }
+
+    let lower = prompt.to_ascii_lowercase();
+    for marker in [
+        "say:",
+        "says:",
+        "saying:",
+        "read:",
+        "speak:",
+        "spoken:",
+        "line:",
+        "script:",
+        "dialogue:",
+        "narration:",
+        "narrator says:",
+        "voice says:",
+    ] {
+        if let Some(index) = lower.find(marker) {
+            let candidate = clean_spoken_text(&prompt[index + marker.len()..]);
+            if !candidate.is_empty() {
+                return candidate;
+            }
+        }
+    }
+
+    for marker in [
+        " narrator says ",
+        " voice says ",
+        " says ",
+        " saying ",
+        " say ",
+        " read ",
+        " speak ",
+        " narrate ",
+    ] {
+        if let Some(index) = lower.find(marker) {
+            let candidate = clean_spoken_text(&prompt[index + marker.len()..]);
+            if !candidate.is_empty() {
+                return candidate;
+            }
+        }
+    }
+
+    clean_spoken_text(prompt)
+}
+
+pub fn derive_speech_direction_heuristic(
+    user_prompt: &str,
+    spoken_text: Option<&str>,
+) -> Option<String> {
+    let mut direction = user_prompt
+        .trim()
+        .replace("\u{201C}", "\"")
+        .replace("\u{201D}", "\"");
+    if direction.is_empty() {
+        return None;
+    }
+
+    if let Some(spoken) = spoken_text.map(str::trim).filter(|value| !value.is_empty()) {
+        for wrapped in [
+            format!("\"{spoken}\""),
+            format!("\"{spoken}\""),
+            format!("'{spoken}'"),
+            spoken.to_string(),
+        ] {
+            if direction.contains(&wrapped) {
+                direction = direction.replacen(&wrapped, " ", 1);
+                break;
+            }
+        }
+    }
+
+    let lower = direction.to_ascii_lowercase();
+    let mut cleaned = direction.clone();
+    for marker in [
+        "narrator says",
+        "voice says",
+        "says",
+        "saying",
+        "say",
+        "read",
+        "speak",
+        "spoken",
+        "script",
+        "dialogue",
+        "line",
+        "narration",
+        "text",
+    ] {
+        if let Some(index) = lower.find(marker) {
+            cleaned.replace_range(index..index + marker.len(), " ");
+            break;
+        }
+    }
+
+    let cleaned = collapse_whitespace(
+        &cleaned
+            .replace(':', " ")
+            .replace(';', " ")
+            .replace('-', " ")
+            .replace(',', " "),
+    );
+    let cleaned = cleaned
+        .trim_matches(|character: char| {
+            character.is_whitespace() || ['"', '\'', '.', ',', ';', ':'].contains(&character)
+        })
+        .to_string();
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn extract_quoted_spoken_text(prompt: &str) -> Option<String> {
+    let normalized = prompt.replace("\u{201C}", "\"").replace("\u{201D}", "\"");
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+
+    for character in normalized.chars() {
+        if character == '"' {
+            if in_quote {
+                let cleaned = clean_spoken_text(&current);
+                if !cleaned.is_empty() {
+                    segments.push(cleaned);
+                }
+                current.clear();
+            }
+            in_quote = !in_quote;
+            continue;
+        }
+
+        if in_quote {
+            current.push(character);
+        }
+    }
+
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments.join(" "))
+    }
+}
+
+fn clean_spoken_text(value: &str) -> String {
+    collapse_whitespace(
+        value
+            .trim()
+            .trim_matches(|character: char| {
+                character.is_whitespace() || ['"', '\''].contains(&character)
+            })
+            .trim_start_matches(':')
+            .trim(),
+    )
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn normalize_prompt_assist_brief(mut brief: PromptAssistBrief) -> PromptAssistBrief {
     brief.expanded_prompt = brief.expanded_prompt.trim().to_string();
     brief.negative_prompt = brief.negative_prompt.trim().to_string();
+    brief.spoken_text = brief
+        .spoken_text
+        .take()
+        .map(|value| clean_spoken_text(&value))
+        .filter(|value| !value.is_empty());
     brief.assumptions = brief
         .assumptions
         .into_iter()
@@ -3211,6 +3471,7 @@ fn default_settings() -> GenerationSettings {
         video_resolution: VideoResolutionPreset::Square256,
         video_duration_seconds: 2,
         video_fps: 8,
+        audio_duration_seconds: 10,
         low_vram_mode: false,
         seed: Some(1),
     }
@@ -3225,6 +3486,7 @@ fn compiler_settings() -> GenerationSettings {
         video_resolution: VideoResolutionPreset::Square512,
         video_duration_seconds: 2,
         video_fps: 12,
+        audio_duration_seconds: 10,
         low_vram_mode: false,
         seed: Some(1),
     }
@@ -3415,6 +3677,7 @@ mod tests {
             MediaKind::Image,
             PromptAssistMode::Gentle,
             None,
+            false,
         );
         assert!(prompt.contains("Target mode: realism."));
         assert!(prompt.contains("Original negative prompt: blurry, low quality."));
@@ -3424,6 +3687,25 @@ mod tests {
         assert!(prompt.contains(
             "Use concrete image-generation cues: subject, setting, camera distance and angle"
         ));
+    }
+
+    #[test]
+    fn spoken_text_heuristic_prefers_quoted_dialogue() {
+        let prompt = r#"Make her say "Hello there, traveler." in a warm calm voice."#;
+        assert_eq!(
+            derive_spoken_text_heuristic(prompt),
+            "Hello there, traveler."
+        );
+    }
+
+    #[test]
+    fn speech_direction_heuristic_strips_the_spoken_line() {
+        let prompt = r#"Say "Hello there, traveler." in a warm calm voice with a gentle smile."#;
+        let spoken = derive_spoken_text_heuristic(prompt);
+        let direction = derive_speech_direction_heuristic(prompt, Some(&spoken))
+            .expect("direction should be derived");
+        assert!(direction.contains("warm calm voice"));
+        assert!(!direction.contains("Hello there, traveler."));
     }
 
     #[test]

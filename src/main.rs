@@ -1,3 +1,4 @@
+mod audio_runtime;
 mod gguf;
 mod render;
 mod runtime;
@@ -42,18 +43,23 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
+    audio_runtime::{
+        detect_audio_runtime_package_support, detect_audio_runtime_support,
+        generate_with_audio_runtime,
+    },
     gguf::inspect_gguf,
     render::{render_audio, render_image, render_video},
     runtime::{
         build_audio_plan, build_image_plan, build_reference_summary, build_video_plan,
-        compile_prompt,
+        compile_prompt, derive_speech_direction_heuristic, derive_spoken_text_heuristic,
     },
     sdcpp::{detect_sdcpp_support, generate_with_sdcpp, realism_runtime_status},
     types::{
-        BackendRuntimeStatus, GenerateAccepted, GenerateRequest, GenerationSettings,
-        GenerationStyle, HardwareProfile, InputAsset, MediaKind, ModelBackend, ModelInfo,
-        OutputEntry, PromptAssistMode, ReferenceSummary, ResolutionPreset, RuntimeAcceleration,
-        RuntimeStatus, ServerEvent, VideoResolutionPreset,
+        BackendRuntimeStatus, EstimateConfidence, GenerateAccepted, GenerateRequest,
+        GenerationSettings, GenerationStyle, HardwareProfile, InputAsset, MediaKind, ModelBackend,
+        ModelInfo, OutputEntry, PrepareResponse, PromptAssistMode, ReferenceSummary,
+        ResolutionPreset, RuntimeAcceleration, RuntimeStatus, ServerEvent, TimeEstimate,
+        VideoResolutionPreset,
     },
 };
 
@@ -66,6 +72,7 @@ struct AppPaths {
     outputs_dir: PathBuf,
     runtime_dir: PathBuf,
     diffuse_runtime_dir: PathBuf,
+    audio_runtime_dir: PathBuf,
 }
 
 impl AppPaths {
@@ -77,6 +84,7 @@ impl AppPaths {
             outputs_dir: root.join("outputs"),
             runtime_dir: root.join("runtime"),
             diffuse_runtime_dir: root.join("diffuse_runtime"),
+            audio_runtime_dir: root.join("audio_runtime"),
         })
     }
 
@@ -89,6 +97,7 @@ impl AppPaths {
         std::fs::create_dir_all(self.outputs_dir.join("gif"))?;
         std::fs::create_dir_all(self.outputs_dir.join("video"))?;
         std::fs::create_dir_all(self.outputs_dir.join("audio"))?;
+        std::fs::create_dir_all(&self.audio_runtime_dir)?;
         Ok(())
     }
 }
@@ -136,6 +145,7 @@ struct PromptAssistTraceSidecar {
     interpreter_model: String,
     original_prompt: String,
     compiled_prompt: String,
+    spoken_text: Option<String>,
     negative_prompt: Option<String>,
     note: String,
     used_original_prompt: bool,
@@ -181,6 +191,7 @@ async fn main() -> Result<()> {
         .route("/api/telemetry/gpu", get(gpu_telemetry_status))
         .route("/api/assets", get(list_assets))
         .route("/api/outputs", get(list_outputs))
+        .route("/api/prepare", post(prepare_generate))
         .route("/api/generate", post(start_generate))
         .route("/ws", get(websocket_endpoint))
         .nest_service("/outputs", ServeDir::new(paths.outputs_dir.clone()))
@@ -262,9 +273,13 @@ async fn is_chatty_art_instance(base_url: &str) -> bool {
 }
 
 async fn list_models(State(state): State<AppState>) -> ApiResult<Vec<ModelInfo>> {
-    scan_models(&state.paths.models_dir, &state.paths.diffuse_runtime_dir)
-        .map(Json)
-        .map_err(internal_error)
+    scan_models(
+        &state.paths.models_dir,
+        &state.paths.diffuse_runtime_dir,
+        &state.paths.audio_runtime_dir,
+    )
+    .map(Json)
+    .map_err(internal_error)
 }
 
 async fn runtime_status(State(state): State<AppState>) -> ApiResult<RuntimeStatus> {
@@ -328,8 +343,7 @@ fn initial_gpu_telemetry() -> GpuTelemetrySnapshot {
         supported: cfg!(target_os = "windows"),
         label: "ECG Window".to_string(),
         note: if cfg!(target_os = "windows") {
-            "ECG-style view of the busiest Windows GPU engine, similar to Task Manager."
-                .to_string()
+            "ECG-style view of the busiest Windows GPU engine, similar to Task Manager.".to_string()
         } else {
             "ECG Window is currently available on Windows only.".to_string()
         },
@@ -553,19 +567,184 @@ async fn list_outputs(State(state): State<AppState>) -> ApiResult<Vec<OutputEntr
         .map_err(internal_error)
 }
 
+#[derive(Clone)]
+struct ResolvedGenerateContext {
+    request: GenerateRequest,
+    model: ModelInfo,
+    prompt_interpreter_model: Option<ModelInfo>,
+    reference_asset: Option<InputAsset>,
+    end_reference_asset: Option<InputAsset>,
+    control_reference_asset: Option<InputAsset>,
+    used_seed: u32,
+}
+
+struct PreparedPromptState {
+    effective_request: GenerateRequest,
+    prompt_assist_note: String,
+    compiled_prompt: Option<String>,
+    prepared_spoken_text: Option<String>,
+    interpreter_model_name: Option<String>,
+    assumptions: Vec<String>,
+    focus_tags: Vec<String>,
+    used_original_prompt: bool,
+    prompt_assist_sidecar: Option<PromptAssistTraceSidecar>,
+}
+
+async fn prepare_generate(
+    State(state): State<AppState>,
+    Json(request): Json<GenerateRequest>,
+) -> ApiResult<PrepareResponse> {
+    let context = resolve_generate_context(&state, request)?;
+    let reference_summary = match context.reference_asset.as_ref() {
+        Some(asset) => Some(
+            build_reference_summary(
+                &state.paths.input_dir,
+                asset,
+                context.request.reference_intent,
+            )
+            .await
+            .map_err(internal_error)?,
+        ),
+        None => None,
+    };
+
+    let prepared = build_prompt_handoff(
+        &state.paths,
+        &context.request,
+        &context.model,
+        context.prompt_interpreter_model.as_ref(),
+        reference_summary.as_ref(),
+        context.used_seed,
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let estimated_frames = match context.request.kind {
+        MediaKind::Gif | MediaKind::Video => Some(context.request.settings.video_frame_count()),
+        MediaKind::Image | MediaKind::Audio => None,
+    };
+    let estimated_time = estimate_generation_time(
+        &context.model,
+        &prepared.effective_request,
+        &state.hardware_profile,
+    );
+
+    Ok(Json(PrepareResponse {
+        model: context.model.name.clone(),
+        kind: context.request.kind,
+        style: context.request.style,
+        original_prompt: context.request.prompt.trim().to_string(),
+        prepared_prompt: prepared.effective_request.prompt.trim().to_string(),
+        prepared_spoken_text: prepared.prepared_spoken_text,
+        effective_negative_prompt: prepared.effective_request.negative_prompt.clone(),
+        prompt_assist: context.request.prompt_assist,
+        interpreter_model: prepared.interpreter_model_name,
+        note: prepared.prompt_assist_note,
+        assumptions: prepared.assumptions,
+        focus_tags: prepared.focus_tags,
+        used_original_prompt: prepared.used_original_prompt,
+        resolution_label: context
+            .request
+            .settings
+            .resolution_label_for(context.request.kind),
+        estimated_frames,
+        estimated_time,
+        hardware_note: state.hardware_profile.note.clone(),
+        reference_note: reference_summary.map(|summary| summary.note),
+        supports_voice_output: context.model.supports_voice_output,
+    }))
+}
+
 async fn start_generate(
     State(state): State<AppState>,
-    Json(mut request): Json<GenerateRequest>,
+    Json(request): Json<GenerateRequest>,
 ) -> ApiResult<GenerateAccepted> {
-    if request.prompt.trim().is_empty() {
+    let context = resolve_generate_context(&state, request)?;
+    let job_id = Uuid::new_v4();
+
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) = run_generation_job(
+            task_state.clone(),
+            job_id,
+            context.model,
+            context.prompt_interpreter_model,
+            context.request,
+            context.reference_asset,
+            context.end_reference_asset,
+            context.control_reference_asset,
+        )
+        .await
+        {
+            let _ = task_state.events.send(ServerEvent::Error {
+                job_id,
+                message: error.to_string(),
+            });
+            error!("{error:#}");
+        }
+    });
+
+    Ok(Json(GenerateAccepted {
+        job_id,
+        used_seed: u64::from(context.used_seed),
+    }))
+}
+
+async fn websocket_endpoint(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_websocket(socket, state))
+}
+
+async fn handle_websocket(mut socket: WebSocket, state: AppState) {
+    let mut receiver = state.events.subscribe();
+
+    loop {
+        tokio::select! {
+            event = receiver.recv() => {
+                match event {
+                    Ok(event) => {
+                        if let Ok(payload) = serde_json::to_string(&event) {
+                            if socket.send(Message::Text(payload.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            incoming = socket.next() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+        }
+    }
+}
+
+fn resolve_generate_context(
+    state: &AppState,
+    mut request: GenerateRequest,
+) -> std::result::Result<ResolvedGenerateContext, (StatusCode, String)> {
+    let has_audio_literal_prompt =
+        request.kind == MediaKind::Audio && request.has_audio_literal_content();
+    if request.prompt.trim().is_empty() && !has_audio_literal_prompt {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Prompt cannot be empty.".to_string(),
+            "Prompt cannot be empty unless the audio Words / Script / Sounds area is filled in."
+                .to_string(),
         ));
     }
 
-    let models = scan_models(&state.paths.models_dir, &state.paths.diffuse_runtime_dir)
-        .map_err(internal_error)?;
+    let models = scan_models(
+        &state.paths.models_dir,
+        &state.paths.diffuse_runtime_dir,
+        &state.paths.audio_runtime_dir,
+    )
+    .map_err(internal_error)?;
     let model = models
         .iter()
         .find(|candidate| candidate.id == request.model || candidate.relative_path == request.model)
@@ -717,81 +896,472 @@ async fn start_generate(
         )
     })?;
     request.settings.seed = Some(u64::from(used_seed));
-    let job_id = Uuid::new_v4();
-    let prompt_interpreter_model = if request.prompt_assist != PromptAssistMode::Off {
-        Some(
-            choose_prompt_interpreter_model(&models, &model).ok_or_else(|| {
-                (
+    let prompt_interpreter_model =
+        if request.prompt_assist != PromptAssistMode::Off && request.prepared_prompt.is_none() {
+            Some(
+                choose_prompt_interpreter_model(&models, &model).ok_or_else(|| {
+                    (
                     StatusCode::BAD_REQUEST,
                     "Prompt Assist needs at least one local expressive llama.cpp model in models/."
                         .to_string(),
                 )
-            })?,
+                })?,
+            )
+        } else {
+            None
+        };
+
+    Ok(ResolvedGenerateContext {
+        request,
+        model,
+        prompt_interpreter_model,
+        reference_asset,
+        end_reference_asset,
+        control_reference_asset,
+        used_seed,
+    })
+}
+
+fn estimate_audio_sequence_units(request: &GenerateRequest) -> f32 {
+    let segments = request.normalized_audio_segments();
+    if segments.is_empty() {
+        return 1.0;
+    }
+
+    let mut previous_start = 0.0f32;
+    let mut previous_end = 1.0f32;
+    let mut total_end = 1.0f32;
+
+    for (index, segment) in segments.iter().enumerate() {
+        let start = if index == 0 {
+            0.0
+        } else if segment.same_time_as_previous {
+            previous_start
+        } else {
+            previous_end
+        };
+        let end = start + 1.0;
+        previous_start = start;
+        previous_end = end;
+        total_end = total_end.max(end);
+    }
+
+    total_end.max(1.0)
+}
+
+async fn build_prompt_handoff(
+    paths: &AppPaths,
+    request: &GenerateRequest,
+    model: &ModelInfo,
+    prompt_interpreter_model: Option<&ModelInfo>,
+    reference_summary: Option<&ReferenceSummary>,
+    used_seed: u32,
+) -> Result<PreparedPromptState> {
+    let mut effective_request = request.clone();
+    let is_speech_audio = request.kind == MediaKind::Audio
+        && model.backend == ModelBackend::AudioRuntime
+        && model.supports_voice_output;
+    let is_sound_audio = request.kind == MediaKind::Audio
+        && model.backend == ModelBackend::AudioRuntime
+        && !model.supports_voice_output;
+    let prepared_prompt = request
+        .prepared_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let prepared_spoken_text = request
+        .prepared_spoken_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let literal_audio_prompt_value = request.combined_audio_literal_prompt();
+    let literal_audio_prompt = literal_audio_prompt_value.as_deref();
+
+    if prepared_prompt.is_some() || (is_speech_audio && prepared_spoken_text.is_some()) {
+        if let Some(prepared_prompt) = prepared_prompt {
+            effective_request.prompt = prepared_prompt.to_string();
+        }
+        effective_request.negative_prompt = request
+            .prepared_negative_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let spoken_text = if is_speech_audio {
+            prepared_spoken_text
+                .map(str::to_string)
+                .or_else(|| literal_audio_prompt.map(str::to_string))
+                .or_else(|| Some(derive_spoken_text_heuristic(&request.prompt)))
+        } else {
+            None
+        };
+        effective_request.prepared_spoken_text = spoken_text.clone();
+        if is_speech_audio && effective_request.prompt.trim().is_empty() {
+            if let Some(direction) = derive_speech_direction_heuristic(
+                &request.prompt,
+                spoken_text.as_deref().or(literal_audio_prompt),
+            ) {
+                effective_request.prompt = direction;
+            }
+        }
+        return Ok(PreparedPromptState {
+            effective_request,
+            prompt_assist_note: request
+                .prepared_note
+                .clone()
+                .unwrap_or_else(|| {
+                    if is_speech_audio {
+                        "Preview Handoff was reviewed before generation. Only the Spoken Text field will be voiced."
+                            .to_string()
+                    } else {
+                        "Preview Handoff was reviewed before generation.".to_string()
+                    }
+                }),
+            compiled_prompt: request
+                .prepared_prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            prepared_spoken_text: spoken_text,
+            interpreter_model_name: request.prepared_interpreter_model.clone(),
+            assumptions: Vec::new(),
+            focus_tags: Vec::new(),
+            used_original_prompt: false,
+            prompt_assist_sidecar: None,
+        });
+    }
+
+    let use_literal_audio_directly =
+        request.prompt.trim().is_empty() && literal_audio_prompt.is_some();
+
+    if request.prompt_assist == PromptAssistMode::Off || use_literal_audio_directly {
+        if is_speech_audio {
+            let spoken_text = literal_audio_prompt
+                .map(str::to_string)
+                .unwrap_or_else(|| derive_spoken_text_heuristic(&request.prompt));
+            let direction = derive_speech_direction_heuristic(&request.prompt, Some(&spoken_text));
+            effective_request.prepared_spoken_text = Some(spoken_text.clone());
+            if let Some(direction_text) = direction.as_deref() {
+                effective_request.prompt = direction_text.to_string();
+            }
+            return Ok(PreparedPromptState {
+                effective_request,
+                prompt_assist_note: if use_literal_audio_directly {
+                    "Using the Words / Script field as the verbatim spoken line. Add prompt text above if you want extra delivery direction."
+                        .to_string()
+                } else {
+                    "Speech handoff separated the words to be spoken from the delivery description. Only the Spoken Text field will be voiced.".to_string()
+                },
+                compiled_prompt: direction,
+                prepared_spoken_text: Some(spoken_text),
+                interpreter_model_name: None,
+                assumptions: Vec::new(),
+                focus_tags: Vec::new(),
+                used_original_prompt: true,
+                prompt_assist_sidecar: None,
+            });
+        }
+        return Ok(PreparedPromptState {
+            effective_request,
+            prompt_assist_note: if is_sound_audio && literal_audio_prompt.is_some() {
+                if use_literal_audio_directly {
+                    "Using the Words / Sounds field as the verbatim sound lane. Add prompt text above if you want extra texture or scene description."
+                        .to_string()
+                } else {
+                    "Prompt Assist stayed out of the Words / Sounds lane. Literal sound cues will be passed through verbatim while the main prompt remains descriptive."
+                        .to_string()
+                }
+            } else {
+                String::new()
+            },
+            compiled_prompt: None,
+            prepared_spoken_text: None,
+            interpreter_model_name: None,
+            assumptions: Vec::new(),
+            focus_tags: Vec::new(),
+            used_original_prompt: true,
+            prompt_assist_sidecar: None,
+        });
+    }
+
+    let interpreter_model = prompt_interpreter_model.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Prompt Assist needs at least one local expressive llama.cpp model in models/."
         )
+    })?;
+
+    let compiled = compile_prompt(
+        &paths.runtime_dir,
+        &paths.models_dir,
+        interpreter_model,
+        &request.prompt,
+        request.negative_prompt.as_deref(),
+        request.style,
+        request.kind,
+        request.prompt_assist,
+        reference_summary,
+        model.supports_voice_output,
+        used_seed,
+    )
+    .await?;
+
+    let assumptions = compiled.brief.assumptions.clone();
+    let focus_tags = compiled.brief.focus_tags.clone();
+    let spoken_text = if is_speech_audio {
+        compiled
+            .spoken_text
+            .clone()
+            .or_else(|| literal_audio_prompt.map(str::to_string))
+            .or_else(|| Some(derive_spoken_text_heuristic(&request.prompt)))
     } else {
         None
     };
-
-    let task_state = state.clone();
-    tokio::spawn(async move {
-        if let Err(error) = run_generation_job(
-            task_state.clone(),
-            job_id,
-            model,
-            prompt_interpreter_model,
-            request,
-            reference_asset,
-            end_reference_asset,
-            control_reference_asset,
-        )
-        .await
-        {
-            let _ = task_state.events.send(ServerEvent::Error {
-                job_id,
-                message: error.to_string(),
-            });
-            error!("{error:#}");
+    let compiled_prompt = if is_speech_audio {
+        if compiled.prompt.trim().is_empty() {
+            derive_speech_direction_heuristic(&request.prompt, spoken_text.as_deref())
+                .unwrap_or_default()
+        } else {
+            compiled.prompt.clone()
         }
-    });
+    } else {
+        compiled.prompt.clone()
+    };
+    effective_request.prepared_spoken_text = spoken_text.clone();
+    effective_request.prompt = if compiled_prompt.trim().is_empty() {
+        request.prompt.clone()
+    } else {
+        compiled_prompt.clone()
+    };
+    if effective_request.style == GenerationStyle::Realism {
+        effective_request.negative_prompt = compiled.negative_prompt.clone();
+    } else if effective_request.negative_prompt.is_none() {
+        effective_request.negative_prompt = compiled.negative_prompt.clone();
+    }
 
-    Ok(Json(GenerateAccepted {
-        job_id,
-        used_seed: u64::from(used_seed),
-    }))
+    Ok(PreparedPromptState {
+        effective_request,
+        prompt_assist_note: compiled.note.clone(),
+        compiled_prompt: (!compiled_prompt.trim().is_empty()).then_some(compiled_prompt.clone()),
+        prepared_spoken_text: spoken_text.clone(),
+        interpreter_model_name: Some(interpreter_model.name.clone()),
+        assumptions,
+        focus_tags,
+        used_original_prompt: compiled.used_original_prompt,
+        prompt_assist_sidecar: Some(PromptAssistTraceSidecar {
+            job_id: Uuid::nil(),
+            kind: request.kind,
+            style: request.style,
+            assist_mode: request.prompt_assist,
+            generation_model: model.name.clone(),
+            interpreter_model: interpreter_model.name.clone(),
+            original_prompt: request.prompt.clone(),
+            compiled_prompt,
+            spoken_text,
+            negative_prompt: compiled.negative_prompt,
+            note: compiled.note,
+            used_original_prompt: compiled.used_original_prompt,
+            assumptions: compiled.brief.assumptions,
+            focus_tags: compiled.brief.focus_tags,
+            extracted_json: compiled.trace.extracted_json,
+            raw_output: compiled.trace.raw_output,
+            stderr: compiled.trace.stderr,
+        }),
+    })
 }
 
-async fn websocket_endpoint(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_websocket(socket, state))
-}
-
-async fn handle_websocket(mut socket: WebSocket, state: AppState) {
-    let mut receiver = state.events.subscribe();
-
-    loop {
-        tokio::select! {
-            event = receiver.recv() => {
-                match event {
-                    Ok(event) => {
-                        if let Ok(payload) = serde_json::to_string(&event) {
-                            if socket.send(Message::Text(payload.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            incoming = socket.next() => {
-                match incoming {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(_)) => {}
-                    Some(Err(_)) => break,
-                }
+fn estimate_generation_time(
+    model: &ModelInfo,
+    request: &GenerateRequest,
+    hardware: &HardwareProfile,
+) -> TimeEstimate {
+    let settings = &request.settings;
+    let (width, height) = settings.dimensions_for(request.kind);
+    let pixel_scale = ((width * height) as f32 / (512.0 * 512.0)).max(0.35);
+    let step_scale = (settings.steps as f32 / 24.0).clamp(0.35, 4.5);
+    let frame_count = settings.video_frame_count().max(1) as f32;
+    let audio_duration = settings.audio_duration_seconds.max(1) as f32;
+    let audio_sequence_units = estimate_audio_sequence_units(request);
+    let audio_segment_count = request.normalized_audio_segments().len().max(1) as f32;
+    let combined_audio_literal_prompt = request.combined_audio_literal_prompt();
+    let speech_source = request
+        .prepared_spoken_text
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| combined_audio_literal_prompt.as_deref())
+        .unwrap_or(&request.prompt);
+    let prompt_word_count = speech_source.split_whitespace().count().max(1) as f32;
+    let low_vram_scale = if settings.low_vram_mode { 1.35 } else { 1.0 };
+    let dedicated_vram = hardware.dedicated_vram_gb.unwrap_or(8.0).max(1.0);
+    let vram_pressure_scale = match request.kind {
+        MediaKind::Image => {
+            if dedicated_vram >= 10.0 {
+                0.9
+            } else {
+                (10.0 / dedicated_vram).min(1.8)
             }
         }
+        MediaKind::Audio => 1.0,
+        MediaKind::Gif | MediaKind::Video => {
+            if dedicated_vram >= 12.0 {
+                0.9
+            } else {
+                (12.0 / dedicated_vram).min(2.4)
+            }
+        }
+    };
+
+    let family = model.family.to_ascii_lowercase();
+    let backend_scale = match model.backend {
+        ModelBackend::LlamaCpp => match request.kind {
+            MediaKind::Image => 1.0,
+            MediaKind::Gif => 1.1,
+            MediaKind::Video => 1.4,
+            MediaKind::Audio => 1.2,
+        },
+        ModelBackend::StableDiffusionCpp => {
+            if family.contains("wan") {
+                match request.kind {
+                    MediaKind::Image => 1.2,
+                    MediaKind::Gif => 1.8,
+                    MediaKind::Video => 2.2,
+                    MediaKind::Audio => 1.0,
+                }
+            } else if family.contains("flux") {
+                1.5
+            } else {
+                1.0
+            }
+        }
+        ModelBackend::AudioRuntime => 1.3,
+    };
+
+    let model_size_scale = match model.backend {
+        ModelBackend::LlamaCpp => {
+            let hinted = parameter_hint(&model.name) as f32;
+            (hinted / 80.0).clamp(0.8, 4.0)
+        }
+        ModelBackend::StableDiffusionCpp | ModelBackend::AudioRuntime => 1.0,
+    };
+
+    let base_seconds = match (model.backend, request.kind) {
+        (ModelBackend::LlamaCpp, MediaKind::Image) => {
+            8.0 * step_scale * pixel_scale * model_size_scale
+        }
+        (ModelBackend::LlamaCpp, MediaKind::Gif) => {
+            10.0 + frame_count * 0.22 * pixel_scale * step_scale * model_size_scale
+        }
+        (ModelBackend::LlamaCpp, MediaKind::Video) => {
+            18.0 + frame_count * 0.35 * pixel_scale * step_scale * model_size_scale
+        }
+        (ModelBackend::LlamaCpp, MediaKind::Audio) => {
+            (8.0 + prompt_word_count * 0.12) * step_scale * model_size_scale
+        }
+        (ModelBackend::StableDiffusionCpp, MediaKind::Image) => {
+            16.0 * pixel_scale * step_scale * backend_scale
+        }
+        (ModelBackend::StableDiffusionCpp, MediaKind::Gif) => {
+            12.0 + frame_count * 0.95 * pixel_scale * step_scale * backend_scale
+        }
+        (ModelBackend::StableDiffusionCpp, MediaKind::Video) => {
+            18.0 + frame_count * 1.15 * pixel_scale * step_scale * backend_scale
+        }
+        (ModelBackend::StableDiffusionCpp, MediaKind::Audio) => 1.0,
+        (ModelBackend::AudioRuntime, MediaKind::Audio) => {
+            if model.supports_voice_output {
+                let reference_scale = if request.reference_asset.is_some() {
+                    1.4
+                } else {
+                    1.0
+                };
+                (10.0 + prompt_word_count * 0.22)
+                    * reference_scale
+                    * backend_scale
+                    * audio_segment_count.max(1.0)
+            } else {
+                (12.0 + (audio_duration * audio_sequence_units) * 4.5)
+                    * step_scale
+                    * backend_scale
+            }
+        }
+        (ModelBackend::AudioRuntime, MediaKind::Image | MediaKind::Gif | MediaKind::Video) => 1.0,
+    } * vram_pressure_scale
+        * low_vram_scale;
+
+    let spread = match (model.backend, request.kind) {
+        (ModelBackend::LlamaCpp, MediaKind::Image | MediaKind::Audio) => 0.20,
+        (ModelBackend::LlamaCpp, _) => 0.30,
+        (ModelBackend::StableDiffusionCpp, MediaKind::Image) => 0.30,
+        (ModelBackend::StableDiffusionCpp, MediaKind::Gif) => 0.45,
+        (ModelBackend::StableDiffusionCpp, MediaKind::Video) => 0.60,
+        (ModelBackend::StableDiffusionCpp, MediaKind::Audio) => 0.20,
+        (ModelBackend::AudioRuntime, MediaKind::Audio) => 0.45,
+        (ModelBackend::AudioRuntime, _) => 0.20,
+    };
+
+    let min_seconds = base_seconds.max(3.0).round() as u32;
+    let max_seconds = (base_seconds * (1.0 + spread))
+        .max(min_seconds as f32 + 2.0)
+        .round() as u32;
+    let confidence = match (model.backend, request.kind) {
+        (ModelBackend::LlamaCpp, MediaKind::Image | MediaKind::Audio) => EstimateConfidence::High,
+        (ModelBackend::LlamaCpp, _) => EstimateConfidence::Medium,
+        (ModelBackend::StableDiffusionCpp, MediaKind::Image) => EstimateConfidence::Medium,
+        (ModelBackend::StableDiffusionCpp, MediaKind::Gif | MediaKind::Video) => {
+            EstimateConfidence::Low
+        }
+        (ModelBackend::StableDiffusionCpp, MediaKind::Audio) => EstimateConfidence::Low,
+        (ModelBackend::AudioRuntime, MediaKind::Audio) => {
+            if model.supports_voice_output {
+                EstimateConfidence::Medium
+            } else {
+                EstimateConfidence::Low
+            }
+        }
+        (ModelBackend::AudioRuntime, _) => EstimateConfidence::Low,
+    };
+    let note = match request.kind {
+        MediaKind::Gif | MediaKind::Video => format!(
+            "{} frames at {} with {}. Video estimates vary most on local hardware.",
+            settings.video_frame_count(),
+            settings.video_resolution.label(),
+            model.name
+        ),
+        MediaKind::Image => format!(
+            "{} at {} steps on {}.",
+            settings.resolution.label(),
+            settings.steps,
+            model.name
+        ),
+        MediaKind::Audio => {
+            if model.backend == ModelBackend::AudioRuntime && model.supports_voice_output {
+                format!(
+                    "Speech estimate based on the spoken text length for {} across {} segment(s). Voice-reference cloning, if used, will slow it down.",
+                    model.name,
+                    audio_segment_count as usize
+                )
+            } else if model.backend == ModelBackend::AudioRuntime {
+                format!(
+                    "Soundscape estimate based on a {}s target clip at {} steps for {} across roughly {:.1} timing unit(s).",
+                    settings.audio_duration_seconds.max(1),
+                    settings.steps,
+                    model.name,
+                    audio_sequence_units
+                )
+            } else {
+                format!(
+                    "Audio estimate based on the planned expressive audio path for {}.",
+                    model.name
+                )
+            }
+        }
+    };
+
+    TimeEstimate {
+        min_seconds,
+        max_seconds,
+        confidence,
+        note,
     }
 }
 
@@ -843,70 +1413,65 @@ async fn run_generation_job(
     let mut interpreter_model_name: Option<String> = None;
     let mut prompt_assist_sidecar: Option<PromptAssistTraceSidecar> = None;
 
-    if request.prompt_assist != PromptAssistMode::Off {
-        let interpreter_model = prompt_interpreter_model.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Prompt Assist needs at least one local expressive llama.cpp model in models/."
-            )
-        })?;
+    if request.prompt_assist != PromptAssistMode::Off
+        || request.prepared_prompt.is_some()
+        || request.prepared_spoken_text.is_some()
+        || request.has_audio_literal_content()
+        || (request.kind == MediaKind::Audio
+            && model.backend == ModelBackend::AudioRuntime
+            && model.supports_voice_output)
+    {
+        if request.prepared_prompt.is_some() {
+            emit_progress(
+                &state,
+                job_id,
+                0.2,
+                "Locked In",
+                "Using the reviewed handoff preview for this generation run.",
+            );
+        } else {
+            emit_progress(
+                &state,
+                job_id,
+                0.2,
+                "Interpreting",
+                "Prompt Assist is expanding the request into a richer local brief.",
+            );
+        }
 
-        emit_progress(
-            &state,
-            job_id,
-            0.2,
-            "Interpreting",
-            "Prompt Assist is expanding the request into a richer local brief.",
-        );
+        let heartbeat = if request.prepared_prompt.is_some() {
+            None
+        } else {
+            Some(spawn_progress_heartbeat(
+                state.clone(),
+                job_id,
+                0.22,
+                0.32,
+                "Interpreting",
+                "Still compiling the prompt locally. This stage is filling in sensible missing details.",
+            ))
+        };
 
-        let heartbeat = spawn_progress_heartbeat(
-            state.clone(),
-            job_id,
-            0.22,
-            0.32,
-            "Interpreting",
-            "Still compiling the prompt locally. This stage is filling in sensible missing details.",
-        );
-        let compile_result = compile_prompt(
-            &state.paths.runtime_dir,
-            &state.paths.models_dir,
-            &interpreter_model,
-            &request.prompt,
-            request.negative_prompt.as_deref(),
-            request.style,
-            request.kind,
-            request.prompt_assist,
+        let prepared_result = build_prompt_handoff(
+            &state.paths,
+            &request,
+            &model,
+            prompt_interpreter_model.as_ref(),
             reference_summary.as_ref(),
             used_seed,
         )
         .await;
-        let _ = heartbeat.send(());
-        let compiled = compile_result?;
-        prompt_assist_note = compiled.note.clone();
-        effective_request.prompt = compiled.prompt.clone();
-        if effective_request.style == GenerationStyle::Realism {
-            effective_request.negative_prompt = compiled.negative_prompt.clone();
-        } else if effective_request.negative_prompt.is_none() {
-            effective_request.negative_prompt = compiled.negative_prompt.clone();
+        if let Some(stop) = heartbeat {
+            let _ = stop.send(());
         }
-        interpreter_model_name = Some(interpreter_model.name.clone());
-        compiled_prompt = Some(compiled.prompt.clone());
-        prompt_assist_sidecar = Some(PromptAssistTraceSidecar {
-            job_id,
-            kind: request.kind,
-            style: request.style,
-            assist_mode: request.prompt_assist,
-            generation_model: model.name.clone(),
-            interpreter_model: interpreter_model.name.clone(),
-            original_prompt: request.prompt.clone(),
-            compiled_prompt: compiled.prompt,
-            negative_prompt: compiled.negative_prompt,
-            note: compiled.note,
-            used_original_prompt: compiled.used_original_prompt,
-            assumptions: compiled.brief.assumptions,
-            focus_tags: compiled.brief.focus_tags,
-            extracted_json: compiled.trace.extracted_json,
-            raw_output: compiled.trace.raw_output,
-            stderr: compiled.trace.stderr,
+        let prepared = prepared_result?;
+        prompt_assist_note = prepared.prompt_assist_note;
+        effective_request = prepared.effective_request;
+        interpreter_model_name = prepared.interpreter_model_name;
+        compiled_prompt = prepared.compiled_prompt;
+        prompt_assist_sidecar = prepared.prompt_assist_sidecar.map(|mut trace| {
+            trace.job_id = job_id;
+            trace
         });
     }
 
@@ -1133,6 +1698,47 @@ async fn run_generation_job(
                 None,
             )
         }
+        ModelBackend::AudioRuntime => {
+            emit_progress(
+                &state,
+                job_id,
+                0.34,
+                "Realism Audio",
+                "Using the local realism audio runtime for speech generation.",
+            );
+
+            let (file_name, relative_path, output_path) =
+                build_output_path(&kind_dir, request.kind, &model.name, used_seed);
+
+            let generated = generate_with_audio_runtime(
+                &state.paths.audio_runtime_dir,
+                &state.paths.models_dir,
+                &state.paths.input_dir,
+                &model,
+                &effective_request,
+                reference_asset.as_ref(),
+                used_seed,
+                &output_path,
+            )
+            .await?;
+
+            emit_progress(
+                &state,
+                job_id,
+                0.78,
+                "Finishing",
+                "Saving the realism audio output and preparing playback.",
+            );
+
+            (
+                file_name,
+                relative_path,
+                output_path,
+                generated.mime,
+                generated.note,
+                None,
+            )
+        }
     };
 
     emit_progress(
@@ -1154,6 +1760,7 @@ async fn run_generation_job(
             ModelBackend::StableDiffusionCpp => {
                 "Generated locally with the stable-diffusion.cpp realism backend."
             }
+            ModelBackend::AudioRuntime => "Generated locally with the realism audio backend.",
         },
     );
     let created_at = Utc::now();
@@ -1175,6 +1782,7 @@ async fn run_generation_job(
         prompt: request.prompt.clone(),
         negative_prompt: effective_request.negative_prompt.clone(),
         compiled_prompt,
+        spoken_text: effective_request.prepared_spoken_text.clone(),
         prompt_assist: request.prompt_assist,
         interpreter_model: interpreter_model_name,
         file_name: file_name.clone(),
@@ -1348,8 +1956,55 @@ fn combine_notes(
     }
 }
 
-fn scan_models(models_dir: &Path, diffuse_runtime_dir: &Path) -> Result<Vec<ModelInfo>> {
+fn scan_models(
+    models_dir: &Path,
+    diffuse_runtime_dir: &Path,
+    audio_runtime_dir: &Path,
+) -> Result<Vec<ModelInfo>> {
     let mut models = Vec::new();
+
+    for entry in std::fs::read_dir(models_dir)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let relative_path = to_slash_path(path.strip_prefix(models_dir)?);
+        let slug = slugify(&file_name);
+
+        let Some(support) =
+            detect_audio_runtime_package_support(&file_name, &path, audio_runtime_dir)
+        else {
+            continue;
+        };
+
+        models.push(ModelInfo {
+            id: relative_path.clone(),
+            name: file_name.clone(),
+            slug,
+            file_name,
+            relative_path,
+            family: support.family,
+            backend: ModelBackend::AudioRuntime,
+            generation_style: GenerationStyle::Realism,
+            runtime_supported: support.runtime_supported,
+            compatibility_note: support.compatibility_note,
+            supported_kinds: support.supported_kinds,
+            requires_reference: false,
+            supports_image_reference: false,
+            requires_end_image_reference: false,
+            supports_end_image_reference: false,
+            supports_video_reference: false,
+            supports_audio_reference: support.supports_audio_reference,
+            supports_voice_output: support.supports_voice_output,
+            mmproj_path: None,
+        });
+    }
 
     for entry in WalkDir::new(models_dir)
         .into_iter()
@@ -1383,6 +2038,7 @@ fn scan_models(models_dir: &Path, diffuse_runtime_dir: &Path) -> Result<Vec<Mode
             &lower,
             mmproj_path.is_some(),
             diffuse_runtime_dir,
+            audio_runtime_dir,
             models_dir,
             &relative_path,
             path,
@@ -1514,6 +2170,7 @@ fn scan_outputs(outputs_dir: &Path) -> Result<Vec<OutputEntry>> {
             prompt: String::new(),
             negative_prompt: None,
             compiled_prompt: None,
+            spoken_text: None,
             prompt_assist: PromptAssistMode::Off,
             interpreter_model: None,
             file_name: path
@@ -1690,6 +2347,7 @@ fn detect_model_support(
     name: &str,
     has_mmproj: bool,
     diffuse_runtime_dir: &Path,
+    audio_runtime_dir: &Path,
     models_dir: &Path,
     relative_path: &str,
     model_path: &Path,
@@ -1711,6 +2369,24 @@ fn detect_model_support(
             supports_video_reference: support.supports_video_reference,
             supports_audio_reference: support.supports_audio_reference,
             supports_voice_output: false,
+        };
+    }
+
+    if let Some(support) = detect_audio_runtime_support(name, audio_runtime_dir) {
+        return DetectedModelSupport {
+            family: support.family,
+            backend: ModelBackend::AudioRuntime,
+            style: GenerationStyle::Realism,
+            runtime_supported: support.runtime_supported,
+            compatibility_note: support.compatibility_note,
+            supported_kinds: support.supported_kinds,
+            requires_reference: false,
+            supports_image_reference: false,
+            requires_end_image_reference: false,
+            supports_end_image_reference: false,
+            supports_video_reference: false,
+            supports_audio_reference: support.supports_audio_reference,
+            supports_voice_output: support.supports_voice_output,
         };
     }
 
@@ -1925,6 +2601,7 @@ fn default_settings() -> GenerationSettings {
         video_resolution: VideoResolutionPreset::Square256,
         video_duration_seconds: 2,
         video_fps: 8,
+        audio_duration_seconds: 10,
         low_vram_mode: false,
         seed: Some(0),
     }
@@ -1948,10 +2625,13 @@ mod tests {
     };
 
     use super::{
-        MAX_RUNTIME_SEED, choose_prompt_interpreter_model, detect_model_support, parameter_hint,
-        resolve_runtime_seed,
+        AppPaths, MAX_RUNTIME_SEED, build_prompt_handoff, choose_prompt_interpreter_model,
+        detect_model_support, parameter_hint, resolve_runtime_seed,
     };
-    use crate::types::{GenerationStyle, MediaKind, ModelBackend, ModelInfo};
+    use crate::types::{
+        AudioPromptSegment, GenerationSettings, GenerationStyle, MediaKind, ModelBackend,
+        ModelInfo, PromptAssistMode, ReferenceIntent, ResolutionPreset, VideoResolutionPreset,
+    };
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -1984,6 +2664,60 @@ mod tests {
             supports_audio_reference: false,
             supports_voice_output: false,
             mmproj_path: None,
+        }
+    }
+
+    fn fake_audio_model(name: &str, supports_voice_output: bool) -> ModelInfo {
+        ModelInfo {
+            id: name.to_string(),
+            name: name.to_string(),
+            slug: name.to_string(),
+            file_name: name.to_string(),
+            relative_path: name.to_string(),
+            family: if supports_voice_output {
+                "OuteTTS".to_string()
+            } else {
+                "Stable Audio Open".to_string()
+            },
+            backend: ModelBackend::AudioRuntime,
+            generation_style: GenerationStyle::Realism,
+            runtime_supported: true,
+            compatibility_note: String::new(),
+            supported_kinds: vec![MediaKind::Audio],
+            requires_reference: false,
+            supports_image_reference: false,
+            requires_end_image_reference: false,
+            supports_end_image_reference: false,
+            supports_video_reference: false,
+            supports_audio_reference: false,
+            supports_voice_output,
+            mmproj_path: None,
+        }
+    }
+
+    fn test_settings() -> GenerationSettings {
+        GenerationSettings {
+            temperature: 0.6,
+            steps: 24,
+            cfg_scale: 6.0,
+            resolution: ResolutionPreset::Square512,
+            video_resolution: VideoResolutionPreset::Square256,
+            video_duration_seconds: 2,
+            video_fps: 8,
+            audio_duration_seconds: 10,
+            low_vram_mode: true,
+            seed: Some(1234),
+        }
+    }
+
+    fn dummy_paths() -> AppPaths {
+        AppPaths {
+            models_dir: PathBuf::from("."),
+            input_dir: PathBuf::from("."),
+            outputs_dir: PathBuf::from("."),
+            runtime_dir: PathBuf::from("."),
+            diffuse_runtime_dir: PathBuf::from("."),
+            audio_runtime_dir: PathBuf::from("."),
         }
     }
 
@@ -2064,6 +2798,7 @@ mod tests {
             "qwen-image-q4_k_m.gguf",
             false,
             &diffuse_dir,
+            Path::new("."),
             &models_dir,
             "qwen-image-q4_k_m.gguf",
             &models_dir.join("qwen-image-q4_k_m.gguf"),
@@ -2083,6 +2818,7 @@ mod tests {
             false,
             Path::new("."),
             Path::new("."),
+            Path::new("."),
             "ltx-2.3-22b-dev-q4_k_m.gguf",
             Path::new("ltx-2.3-22b-dev-q4_k_m.gguf"),
         );
@@ -2099,6 +2835,7 @@ mod tests {
         let support = detect_model_support(
             "umt5-xxl-encoder-q4_k_m.gguf",
             false,
+            Path::new("."),
             Path::new("."),
             &dir,
             "umt5-xxl-encoder-Q4_K_M.gguf",
@@ -2121,6 +2858,7 @@ mod tests {
             "vaetki-vl-7b-a1b-q4_k_m.gguf",
             false,
             Path::new("."),
+            Path::new("."),
             &dir,
             "VAETKI-VL-7B-A1B-Q4_K_M.gguf",
             &model_path,
@@ -2129,5 +2867,156 @@ mod tests {
         assert!(!support.runtime_supported);
         assert_eq!(support.style, GenerationStyle::Expressive);
         assert!(support.compatibility_note.contains("vaetki"));
+    }
+
+    #[test]
+    fn detects_outetts_as_realism_audio_candidate() {
+        let dir = temp_dir("outetts");
+        let model_path = dir.join("Llama-OuteTTS-1.0-1B-Q4_K_M.gguf");
+        fs::write(&model_path, tiny_gguf_with_architecture("llama")).unwrap();
+
+        let support = detect_model_support(
+            "llama-outetts-1.0-1b-q4_k_m.gguf",
+            false,
+            Path::new("."),
+            &dir,
+            &dir,
+            "Llama-OuteTTS-1.0-1B-Q4_K_M.gguf",
+            &model_path,
+        );
+
+        assert!(!support.runtime_supported);
+        assert_eq!(support.style, GenerationStyle::Realism);
+        assert_eq!(support.backend, ModelBackend::AudioRuntime);
+        assert_eq!(support.supported_kinds, vec![MediaKind::Audio]);
+        assert!(support.supports_voice_output);
+        assert!(support.compatibility_note.contains("outetts"));
+    }
+
+    #[test]
+    fn detects_qwen3_tts_as_realism_audio_candidate() {
+        let dir = temp_dir("qwen3tts");
+        let model_path = dir.join("Qwen3-TTS-4B-Q4_K_M.gguf");
+        fs::write(&model_path, tiny_gguf_with_architecture("qwen3")).unwrap();
+
+        let support = detect_model_support(
+            "qwen3-tts-4b-q4_k_m.gguf",
+            false,
+            Path::new("."),
+            &dir,
+            &dir,
+            "Qwen3-TTS-4B-Q4_K_M.gguf",
+            &model_path,
+        );
+
+        assert!(!support.runtime_supported);
+        assert_eq!(support.style, GenerationStyle::Realism);
+        assert_eq!(support.backend, ModelBackend::AudioRuntime);
+        assert_eq!(support.supported_kinds, vec![MediaKind::Audio]);
+        assert!(support.supports_voice_output);
+        assert!(support.compatibility_note.contains("Qwen3-TTS"));
+    }
+
+    #[tokio::test]
+    async fn prompt_assist_keeps_sound_segments_out_of_prepared_prompt() {
+        let request = crate::types::GenerateRequest {
+            prompt: "cinematic city rain ambience".to_string(),
+            negative_prompt: Some("distortion, clipping".to_string()),
+            prompt_assist: PromptAssistMode::Gentle,
+            model: "stable-audio-open-1.0".to_string(),
+            kind: MediaKind::Audio,
+            style: GenerationStyle::Realism,
+            settings: test_settings(),
+            reference_asset: None,
+            reference_intent: ReferenceIntent::Guide,
+            end_reference_asset: None,
+            control_reference_asset: None,
+            prepared_prompt: Some(
+                "cinematic city rain ambience, spacious stereo field, soft reflections"
+                    .to_string(),
+            ),
+            prepared_negative_prompt: Some("distortion, clipping".to_string()),
+            prepared_note: Some("Preview Handoff was reviewed before generation.".to_string()),
+            prepared_interpreter_model: Some("Qwen3-8B-abliterated-q8_0".to_string()),
+            prepared_spoken_text: None,
+            audio_literal_prompt: None,
+            audio_segments: vec![
+                AudioPromptSegment {
+                    label: Some("Rain Bed".to_string()),
+                    literal: "steady rain on pavement".to_string(),
+                    same_time_as_previous: false,
+                },
+                AudioPromptSegment {
+                    label: Some("Thunder Hit".to_string()),
+                    literal: "distant thunder crack".to_string(),
+                    same_time_as_previous: true,
+                },
+            ],
+        };
+
+        let prepared = build_prompt_handoff(
+            &dummy_paths(),
+            &request,
+            &fake_audio_model("stable-audio-open-1.0", false),
+            None,
+            None,
+            1234,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            prepared.effective_request.prompt,
+            "cinematic city rain ambience, spacious stereo field, soft reflections"
+        );
+        assert!(!prepared
+            .effective_request
+            .prompt
+            .contains("steady rain on pavement"));
+        assert!(!prepared
+            .effective_request
+            .prompt
+            .contains("distant thunder crack"));
+    }
+
+    #[tokio::test]
+    async fn sound_audio_without_prompt_assist_keeps_literal_lane_separate() {
+        let request = crate::types::GenerateRequest {
+            prompt: "lush forest ambience, soft wind".to_string(),
+            negative_prompt: Some("distortion".to_string()),
+            prompt_assist: PromptAssistMode::Off,
+            model: "stable-audio-open-1.0".to_string(),
+            kind: MediaKind::Audio,
+            style: GenerationStyle::Realism,
+            settings: test_settings(),
+            reference_asset: None,
+            reference_intent: ReferenceIntent::Guide,
+            end_reference_asset: None,
+            control_reference_asset: None,
+            prepared_prompt: None,
+            prepared_negative_prompt: None,
+            prepared_note: None,
+            prepared_interpreter_model: None,
+            prepared_spoken_text: None,
+            audio_literal_prompt: Some("bird chirps, creek water".to_string()),
+            audio_segments: Vec::new(),
+        };
+
+        let prepared = build_prompt_handoff(
+            &dummy_paths(),
+            &request,
+            &fake_audio_model("stable-audio-open-1.0", false),
+            None,
+            None,
+            1234,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prepared.effective_request.prompt, "lush forest ambience, soft wind");
+        assert_eq!(
+            prepared.effective_request.combined_audio_literal_prompt().as_deref(),
+            Some("bird chirps, creek water")
+        );
     }
 }

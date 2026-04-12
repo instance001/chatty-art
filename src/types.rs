@@ -71,6 +71,7 @@ pub enum ModelBackend {
     #[default]
     LlamaCpp,
     StableDiffusionCpp,
+    AudioRuntime,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,6 +180,10 @@ fn default_video_fps() -> u32 {
     12
 }
 
+fn default_audio_duration_seconds() -> u32 {
+    10
+}
+
 fn default_low_vram_mode() -> bool {
     false
 }
@@ -195,6 +200,8 @@ pub struct GenerationSettings {
     pub video_duration_seconds: u32,
     #[serde(default = "default_video_fps")]
     pub video_fps: u32,
+    #[serde(default = "default_audio_duration_seconds")]
+    pub audio_duration_seconds: u32,
     #[serde(default = "default_low_vram_mode")]
     pub low_vram_mode: bool,
     pub seed: Option<u64>,
@@ -204,7 +211,8 @@ impl GenerationSettings {
     pub fn dimensions_for(&self, kind: MediaKind) -> (u32, u32) {
         match kind {
             MediaKind::Gif | MediaKind::Video => self.video_resolution.dimensions(),
-            MediaKind::Image | MediaKind::Audio => self.resolution.dimensions(),
+            MediaKind::Image => self.resolution.dimensions(),
+            MediaKind::Audio => (512, 512),
         }
     }
 
@@ -217,7 +225,13 @@ impl GenerationSettings {
                 self.video_fps,
                 self.video_frame_count()
             ),
-            MediaKind::Image | MediaKind::Audio => self.resolution.label().to_string(),
+            MediaKind::Image => self.resolution.label().to_string(),
+            MediaKind::Audio => format!(
+                "{}s audio | {} steps | CFG {:.1}",
+                self.audio_duration_seconds.max(1),
+                self.steps,
+                self.cfg_scale
+            ),
         }
     }
 
@@ -248,12 +262,139 @@ pub struct GenerateRequest {
     pub end_reference_asset: Option<String>,
     #[serde(default)]
     pub control_reference_asset: Option<String>,
+    #[serde(default)]
+    pub prepared_prompt: Option<String>,
+    #[serde(default)]
+    pub prepared_negative_prompt: Option<String>,
+    #[serde(default)]
+    pub prepared_note: Option<String>,
+    #[serde(default)]
+    pub prepared_interpreter_model: Option<String>,
+    #[serde(default)]
+    pub prepared_spoken_text: Option<String>,
+    #[serde(default)]
+    pub audio_literal_prompt: Option<String>,
+    #[serde(default)]
+    pub audio_segments: Vec<AudioPromptSegment>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AudioPromptSegment {
+    #[serde(default)]
+    pub label: Option<String>,
+    pub literal: String,
+    #[serde(default)]
+    pub same_time_as_previous: bool,
+}
+
+impl AudioPromptSegment {
+    pub fn normalized(&self) -> Option<Self> {
+        let literal = self.literal.trim();
+        if literal.is_empty() {
+            return None;
+        }
+
+        let label = self
+            .label
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        Some(Self {
+            label,
+            literal: literal.to_string(),
+            same_time_as_previous: self.same_time_as_previous,
+        })
+    }
+}
+
+impl GenerateRequest {
+    pub fn normalized_audio_segments(&self) -> Vec<AudioPromptSegment> {
+        self.audio_segments
+            .iter()
+            .filter_map(AudioPromptSegment::normalized)
+            .collect()
+    }
+
+    pub fn has_audio_literal_content(&self) -> bool {
+        self.audio_literal_prompt
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+            || !self.normalized_audio_segments().is_empty()
+    }
+
+    pub fn combined_audio_literal_prompt(&self) -> Option<String> {
+        if let Some(single) = self
+            .audio_literal_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(single.to_string());
+        }
+
+        let segments = self.normalized_audio_segments();
+        if segments.is_empty() {
+            return None;
+        }
+
+        Some(
+            segments
+                .into_iter()
+                .map(|segment| segment.literal)
+                .collect::<Vec<_>>()
+                .join(" | "),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateAccepted {
     pub job_id: Uuid,
     pub used_seed: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EstimateConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeEstimate {
+    pub min_seconds: u32,
+    pub max_seconds: u32,
+    pub confidence: EstimateConfidence,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrepareResponse {
+    pub model: String,
+    pub kind: MediaKind,
+    pub style: GenerationStyle,
+    pub original_prompt: String,
+    pub prepared_prompt: String,
+    #[serde(default)]
+    pub prepared_spoken_text: Option<String>,
+    pub effective_negative_prompt: Option<String>,
+    pub prompt_assist: PromptAssistMode,
+    pub interpreter_model: Option<String>,
+    pub note: String,
+    pub assumptions: Vec<String>,
+    pub focus_tags: Vec<String>,
+    pub used_original_prompt: bool,
+    pub resolution_label: String,
+    pub estimated_frames: Option<u32>,
+    pub estimated_time: TimeEstimate,
+    pub hardware_note: String,
+    pub reference_note: Option<String>,
+    #[serde(default)]
+    pub supports_voice_output: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +457,8 @@ pub struct OutputEntry {
     pub negative_prompt: Option<String>,
     #[serde(default)]
     pub compiled_prompt: Option<String>,
+    #[serde(default)]
+    pub spoken_text: Option<String>,
     #[serde(default)]
     pub prompt_assist: PromptAssistMode,
     #[serde(default)]

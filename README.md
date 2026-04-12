@@ -18,6 +18,9 @@ Chatty-art is a simple local image/GIF/video/audio generator with:
 - Model-aware `Recommended Limits On This Hardware` guidance in the UI
 - Collapsible `Controls`, `Outputs`, and `Input Tray` columns for easier layout management
 - Optional `Prompt Assist` compiler that expands short prompts into richer local briefs before generation
+- Dedicated audio `Words / Script` or `Words / Sounds` box for realism audio models
+- `Basic / Advanced` prompt mode split, so the beginner path stays simple while advanced users get deeper controls
+- Advanced audio sequencing with reusable voice/layer names, plus `after last box` or `same time as last box` timing
 
 If you want a true beginner walkthrough, start with [USER_MANUAL.md](./USER_MANUAL.md).
 
@@ -130,6 +133,151 @@ Use this as a plain-language guide:
 - `Wan2.2` paired models and heavier multi-part families
   Stronger but easier to mismatch. Better as a later upgrade, not a first install.
 
+## Audio Downloads
+
+`Expressive` is still the easiest one-click audio path, but Chatty-art now also supports specialist realism audio lanes:
+
+- `OuteTTS` for speech / voice output
+- `Stable Audio Open` for ambience, effects, and soundscape-style clips
+
+These are the current audio downloads to keep on hand:
+
+- `OuteTTS-1.0-0.6B-FP16.gguf`
+  https://huggingface.co/OuteAI/OuteTTS-1.0-0.6B-GGUF/resolve/main/OuteTTS-1.0-0.6B-FP16.gguf
+- `Llama-OuteTTS-1.0-1B-FP16.gguf`
+  https://huggingface.co/OuteAI/Llama-OuteTTS-1.0-1B-GGUF/resolve/main/Llama-OuteTTS-1.0-1B-FP16.gguf
+- `OuteTTS` runtime project:
+  https://github.com/edwko/OuteTTS
+
+For the heavier realism soundscape lane, keep this package together:
+
+- `stable-audio-open-1.0` model package:
+  https://huggingface.co/stabilityai/stable-audio-open-1.0
+- `stable-audio-tools` runtime project:
+  https://github.com/Stability-AI/stable-audio-tools
+
+Where they go:
+
+- Put the `OuteTTS` `.gguf` files directly into `models/`
+- Keep the `stable-audio-open-1.0` package together as a folder under `models/stable-audio-open-1.0/`
+- Keep source/runtime repos out of `models/`
+  - `audio_runtime/outetts/`
+  - `audio_runtime/stable_audio_tools/`
+
+Important:
+
+- `OuteTTS` is the cleaner first target for realism-style speech audio
+- `stable-audio-open-1.0` is a full model package, not a one-file GGUF
+- `stable-audio-open-1.0` is not part of the current image/video starter stack and is not required for the existing realism visual workflow
+- If you download Stable Audio via `hf download`, keep the folder structure intact
+
+## Audio Prompt Workflow
+
+When you pick a realism audio model, Chatty-art can work in two prompt modes:
+
+- `Basic`
+  The clean beginner path. You get the normal audio prompt boxes and can generate quickly.
+- `Advanced`
+  The deeper control path. You can add multiple timed audio boxes and reuse names to keep a stable identity across the sequence.
+
+In `Basic`, Chatty-art can show three different text boxes:
+
+- `Prompt`
+  Use this for descriptors and intent.
+  Think: tone, accent, pacing, environment, delivery, texture, mood, recording style.
+- `Negative Prompt`
+  Use this for what you do not want.
+  Think: muddy audio, robotic voice, clipping, harsh hiss, distorted bass, overprocessed sound.
+- `Words / Script` or `Words / Sounds`
+  This is the literal lane.
+  For speech models like `OuteTTS`, use it for the exact words you want spoken.
+  For sound models like `Stable Audio Open`, use it for literal cue words you want preserved, like `dripping water, distant thunder, crackling fire`.
+
+In `Advanced`, audio models can expand that literal lane into a sequence builder:
+
+- Add multiple boxes with `Add new prompt box`
+- Remove a box with the `X` in the box corner
+- Choose whether each box starts `after last box` or `same time as last box`
+- Reuse the same name to keep the same identity across segments
+
+Identity rule:
+
+- `OuteTTS`
+  Reusing the same `Voice Name / Character Note` tells Chatty-art to keep the same character-like voice identity across those segments.
+- `Stable Audio Open`
+  Reusing the same `Layer Name / Sound Note` tells Chatty-art to keep the same seeded sound identity across those segments.
+
+Beginner rule:
+
+- speech model:
+  - `Prompt` = how it should sound
+  - `Words / Script` = exactly what should be said
+- soundscape model:
+  - `Prompt` = overall scene and texture
+  - `Words / Sounds` = literal cue list
+
+Example speech setup:
+
+- `Prompt`
+  `warm Australian female voice, calm pacing, clear diction, close microphone, gentle smile`
+- `Words / Script`
+  `Welcome to Chatty-art. Local generation is ready.`
+
+Example soundscape setup:
+
+- `Prompt`
+  `quiet nighttime forest ambience, cinematic depth, soft wind, natural field recording`
+- `Words / Sounds`
+  `distant owl, dry leaves, soft wind, creek water`
+
+Example advanced speech setup:
+
+- Box 1
+  - `Voice Name / Character Note`
+    `Narrator`
+  - timing
+    `after last box`
+  - `Words / Script`
+    `Welcome to Chatty-art.`
+- Box 2
+  - `Voice Name / Character Note`
+    `Narrator`
+  - timing
+    `after last box`
+  - `Words / Script`
+    `Everything is running locally on this machine.`
+- Box 3
+  - `Voice Name / Character Note`
+    `Caller`
+  - timing
+    `same time as last box`
+  - `Words / Script`
+    `Can you hear me?`
+
+Example advanced sound setup:
+
+- Box 1
+  - `Layer Name / Sound Note`
+    `Rain Bed`
+  - timing
+    `after last box`
+  - `Words / Sounds`
+    `steady rain, soft roof patter`
+- Box 2
+  - `Layer Name / Sound Note`
+    `Thunder Hit`
+  - timing
+    `same time as last box`
+  - `Words / Sounds`
+    `distant thunder crack`
+- Box 3
+  - `Layer Name / Sound Note`
+    `Rain Bed`
+  - timing
+    `after last box`
+  - `Words / Sounds`
+    `steady rain, soft roof patter`
+
 ## Run
 
 1. Drop one or more `.gguf` models into `models/`
@@ -163,8 +311,18 @@ The app opens at `http://127.0.0.1:7878`.
 - The Input Tray lets you choose whether the selected file should be used as a `Guide` or treated as the image to `Edit`.
 - The dashboard columns can be collapsed with `Hide` and restored from the bottom-right dock as `Controls`, `Outputs`, and `Input Tray`.
 - In realism mode, image references currently come from `input/images/`.
+- Realism audio uses specialist backends alongside the realism visual lane:
+  - `OuteTTS` for speech
+  - `Stable Audio Open` for soundscapes / SFX
+- Advanced audio currently stays within one backend at a time.
+  - `OuteTTS` handles multi-segment speech
+  - `Stable Audio Open` handles multi-segment sound layers
+  - Chatty-art does not yet merge speech and sound backends into one combined audio job
 - `Prompt Assist` can be set to `Off`, `Gentle`, or `Strong`.
 - Prompt Assist uses a local expressive `llama.cpp` model as an interpreter role before generation.
+- For realism speech models, Prompt Assist now separates spoken words from delivery direction.
+- For realism sound models, Prompt Assist only expands the descriptive prompt and negative prompt.
+- For realism audio models, the `Words / Script` or `Words / Sounds` field is the best place for verbatim content.
 - `Generate GIF` and `Generate Video` are separate on purpose. GIF is usually the easier preview/share format, while true local video depends on the selected realism family.
 - GIF/video settings include clip resolution, duration, and FPS.
 - `Low VRAM Mode` uses a safer realism launch profile that spills more work to CPU and tiles VAE decode when needed.
@@ -178,6 +336,7 @@ The app opens at `http://127.0.0.1:7878`.
 - Realism image output is saved as `.png`
 - Realism GIF output is saved as `.gif`
 - Realism true video output is saved as `.avi` for the families that support real local video
+- Realism audio output is saved as `.wav`
 - Some browsers do not preview `.avi` inline cleanly, so GIF is still the easiest animated preview format
 - If a model returns invalid JSON during planning, Chatty-art falls back to a deterministic local renderer so the job can still finish cleanly.
 - Expressive runs now also save raw planner sidecars as `*.planner.json`, and Prompt Assist runs save compiler sidecars as `*.compiler.json`.
