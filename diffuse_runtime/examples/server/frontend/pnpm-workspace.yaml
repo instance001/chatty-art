@@ -1,7 +1,0 @@
-packages:
-  - .
-
-onlyBuiltDependencies:
-  - canvas
-  - esbuild
-  - vue-demi
