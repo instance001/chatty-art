@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chatty-art</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Local Only | GGUF Drop-In | Vulkan Ready</p>
+        <h1>Chatty-art</h1>
+        <p class="hero-copy">Drop GGUF models into <code>models/</code>, open the dashboard, type a prompt, and generate quick local image, GIF, video, or audio outputs without a graph editor.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="refreshAll" class="ghost-button" type="button">Refresh Files</button>
+        <span class="status-pill">Auto-saves to <code>outputs/</code></span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="left-column">
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Prompt</h2>
+            <div class="panel-header-actions">
+              <span class="panel-note">Single-page dashboard</span>
+              <button id="toggleLeftColumn" class="ghost-button" type="button">Hide</button>
+            </div>
+          </div>
+          <div class="mode-switch" aria-label="Generation mode">
+            <button class="mode-option active" data-style="expressive" type="button">Expressive</button>
+            <button class="mode-option" data-style="realism" type="button">Realism</button>
+          </div>
+          <div class="mode-switch secondary-switch" aria-label="Prompt panel mode">
+            <button class="mode-option active" data-workflow="basic" type="button">Basic</button>
+            <button class="mode-option" data-workflow="advanced" type="button">Advanced</button>
+          </div>
+          <div class="selection-summary style-summary" id="styleSummary">Expressive uses the bundled llama.cpp planner plus Chatty-art's local renderer for fast all-in-one output.</div>
+          <div class="selection-summary workflow-summary" id="workflowSummary">Basic keeps the workflow simple while still letting you review the handoff. Advanced adds deeper controls for power users.</div>
+          <div class="runtime-badges" id="runtimeBadges"></div>
+          <label class="field-block">
+            <span class="field-title">What should Chatty-art make?</span>
+            <textarea id="promptInput" rows="6" placeholder="Example: A windswept neon lighthouse poster with glowing waves and cinematic contrast."></textarea>
+          </label>
+
+          <label class="field-block hidden" id="negativePromptBlock">
+            <span class="field-title">Negative Prompt</span>
+            <textarea id="negativePromptInput" rows="3" placeholder="Optional: things realism mode should avoid, like blurry, low quality, extra limbs, bad anatomy."></textarea>
+          </label>
+
+          <label class="field-block hidden" id="audioLiteralPromptBlock">
+            <span class="field-title" id="audioLiteralPromptTitle">Words / Sounds</span>
+            <textarea id="audioLiteralPromptInput" rows="3" placeholder="Optional verbatim words or literal sound cues to preserve exactly."></textarea>
+          </label>
+
+          <div class="field-block hidden" id="audioSegmentsBlock">
+            <div class="field-title-row">
+              <span class="field-title" id="audioSegmentsTitle">Words / Sound Sequence</span>
+              <button id="addAudioSegmentButton" class="ghost-button mini-ghost-button" type="button">Add New Prompt Box</button>
+            </div>
+            <p class="field-help" id="audioSegmentsHelp">Advanced audio mode lets you stack multiple voice or sound events. Each box can start after the last box or at the same time as it.</p>
+            <div id="audioSegmentsList" class="audio-segments-list"></div>
+          </div>
+
+          <div class="field-row">
+            <label class="field-block">
+              <span class="field-title">Model</span>
+              <select id="modelSelect"></select>
+            </label>
+            <div class="selection-summary" id="modelSummary">No models detected yet.</div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Settings</h2>
+            <span class="panel-note">Hover the help dots for quick explanations</span>
+          </div>
+
+          <div class="settings-grid">
+            <label class="setting-card" id="temperatureCard">
+              <span class="setting-title">Temperature <button class="help-dot" type="button" data-tip="How creative or random the planner should be. Lower values stay predictable, higher values allow wilder surprises.">?</button></span>
+              <input id="temperatureInput" type="range" min="0" max="2" step="0.1" value="0.6">
+              <span class="setting-value" id="temperatureValue">0.6</span>
+              <span class="setting-copy" id="temperatureCopy">How creative/random. <strong>0</strong> stays predictable, <strong>2</strong> gets wild.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">Steps <button class="help-dot" type="button" data-tip="How much planning detail to spend on the output. Higher values usually create richer results, but they also take longer.">?</button></span>
+              <input id="stepsInput" type="range" min="1" max="100" step="1" value="28">
+              <span class="setting-value" id="stepsValue">28</span>
+              <span class="setting-copy">Processing quality. More steps generally means better detail, but slower generation.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">CFG Scale <button class="help-dot" type="button" data-tip="How strongly the planner should stick to your wording. Low values leave room for interpretation, high values follow the prompt more strictly.">?</button></span>
+              <input id="cfgInput" type="range" min="1" max="20" step="0.5" value="7.5">
+              <span class="setting-value" id="cfgValue">7.5</span>
+              <span class="setting-copy">Prompt adherence. Higher values follow your prompt more strictly.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">Resolution <button class="help-dot" type="button" data-tip="Pick a size preset for the saved output. Larger sizes look sharper, but they create bigger files and can take longer to render.">?</button></span>
+              <select id="resolutionInput">
+                <option value="square512">Square 512</option>
+                <option value="square768">Square 768</option>
+                <option value="landscape720">Landscape 1280x720</option>
+                <option value="portrait768">Portrait 768x1024</option>
+                <option value="landscape1024">Landscape 1024x768</option>
+                <option value="poster1024">Poster 1024x1280</option>
+              </select>
+              <span class="setting-copy">Output size preset. Larger presets create sharper but heavier files.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">Video Resolution <button class="help-dot" type="button" data-tip="Used for Generate GIF and Generate Video. Smaller clip sizes are much easier on VRAM for Wan-style jobs.">?</button></span>
+              <select id="videoResolutionInput">
+                <option value="square256">256x256</option>
+                <option value="square512">512x512</option>
+                <option value="square768">768x768</option>
+              </select>
+              <span class="setting-copy">Used for GIF/video output. Start small for video models if VRAM is tight.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">Video Duration <button class="help-dot" type="button" data-tip="Used for Generate GIF and Generate Video. Longer clips need more frames, more time, and more VRAM.">?</button></span>
+              <select id="videoDurationInput">
+                <option value="2">2s</option>
+                <option value="5">5s</option>
+                <option value="10">10s</option>
+                <option value="20">20s</option>
+              </select>
+              <span class="setting-copy" id="videoDurationCopy">Used for GIF/video output. 2s at 8 FPS = 16 frames.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">Video FPS <button class="help-dot" type="button" data-tip="Used for Generate GIF and Generate Video. Higher FPS looks smoother, but it increases frame count and hardware load.">?</button></span>
+              <select id="videoFpsInput">
+                <option value="8">8</option>
+                <option value="16">16</option>
+                <option value="24">24</option>
+              </select>
+              <span class="setting-copy" id="videoFpsCopy">Playback speed for GIF/video output. Higher FPS is smoother but heavier.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">Audio Duration <button class="help-dot" type="button" data-tip="Used for Generate Audio. Stable Audio style soundscape models use this directly. Speech models like OuteTTS mostly care about prompt length instead.">?</button></span>
+              <select id="audioDurationInput">
+                <option value="5">5s</option>
+                <option value="10" selected>10s</option>
+                <option value="20">20s</option>
+                <option value="30">30s</option>
+              </select>
+              <span class="setting-copy" id="audioDurationCopy">Target clip length for realism soundscape audio. Speech-style audio models mostly ignore this.</span>
+            </label>
+
+            <label class="setting-card" id="lowVramCard">
+              <span class="setting-title">Low VRAM Mode <button class="help-dot" type="button" data-tip="Uses a more conservative realism runtime profile by spilling more work to CPU and tiling VAE decode. This is slower, but it can save bigger images and video jobs on GPUs that run out of dedicated VRAM.">?</button></span>
+              <label class="setting-toggle">
+                <input id="lowVramInput" type="checkbox">
+                <span>Use the safer low-memory launch profile</span>
+              </label>
+              <span class="setting-copy" id="lowVramCopy">Helpful for realism jobs on GPUs that hit VRAM limits, especially higher resolutions and video.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">Prompt Assist <button class="help-dot" type="button" data-tip="Lets a local interpreter LLM expand short prompts into richer generator-ready briefs. Gentle adds a few sensible defaults. Strong makes more decisions for you.">?</button></span>
+              <select id="promptAssistInput">
+                <option value="off">Off</option>
+                <option value="gentle">Gentle</option>
+                <option value="strong">Strong</option>
+              </select>
+              <span class="setting-copy">Useful when the original prompt is short or vague and you want the app to fill in missing details.</span>
+            </label>
+
+            <label class="setting-card">
+              <span class="setting-title">Seed <button class="help-dot" type="button" data-tip="Use the same seed to reproduce the same result with the same prompt, model, and settings. Leave blank for a fresh random seed.">?</button></span>
+              <input id="seedInput" type="number" min="0" max="4294967295" step="1" placeholder="Random">
+              <span class="setting-copy">For repeatable results. Same seed plus same settings should reproduce the same output.</span>
+            </label>
+          </div>
+        </article>
+
+        <article class="panel" id="previewHandoffPanel">
+          <div class="panel-header">
+            <h2>Preview Handoff</h2>
+            <span class="panel-note">Inspect and refine what gets sent to the generator before you commit</span>
+          </div>
+
+          <div class="handoff-toolbar">
+            <label class="field-block compact-field">
+              <span class="field-title">Preview for</span>
+              <select id="prepareKindInput">
+                <option value="image">Image</option>
+                <option value="gif">GIF</option>
+                <option value="video">Video</option>
+                <option value="audio">Audio</option>
+              </select>
+            </label>
+
+            <div class="handoff-actions">
+              <button id="prepareRequestButton" class="ghost-button" type="button">Preview Handoff</button>
+              <button id="clearPreparedButton" class="ghost-button" type="button">Clear</button>
+            </div>
+          </div>
+
+          <div id="preparedEmpty" class="selection-summary handoff-empty">
+            Preview Handoff shows the compiled prompt, separated spoken text when relevant, merged negative prompt, estimated frames, and a rough local time estimate before you generate.
+          </div>
+
+          <div id="preparedPanel" class="prepared-panel hidden">
+            <div class="prepared-meta">
+              <div class="prepared-chip-group" id="preparedMetaChips"></div>
+              <div class="prepared-copy" id="preparedNote"></div>
+            </div>
+
+            <label class="field-block">
+              <span class="field-title" id="preparedPromptTitle">Prepared Prompt</span>
+              <textarea id="preparedPromptInput" rows="5" placeholder="The compiled handoff prompt will appear here after Preview Handoff runs."></textarea>
+            </label>
+
+            <label class="field-block hidden" id="preparedSpokenBlock">
+              <span class="field-title">Prepared Spoken Text</span>
+              <textarea id="preparedSpokenInput" rows="4" placeholder="Only this text will be spoken aloud by speech-style audio models."></textarea>
+            </label>
+
+            <label class="field-block" id="preparedNegativeBlock">
+              <span class="field-title">Prepared Negative Prompt</span>
+              <textarea id="preparedNegativeInput" rows="3" placeholder="The effective negative prompt will appear here after Preview Handoff runs."></textarea>
+            </label>
+
+            <div class="prepared-estimate" id="preparedEstimate"></div>
+            <div class="prepared-lists">
+              <div class="prepared-list">
+                <strong>Focus Cues</strong>
+                <div id="preparedFocusTags" class="prepared-chip-group"></div>
+              </div>
+              <div class="prepared-list">
+                <strong>Assumptions</strong>
+                <div id="preparedAssumptions" class="prepared-copy"></div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Generate</h2>
+            <span class="panel-note">One job at a time for a simple local workflow</span>
+          </div>
+
+          <div class="button-row">
+            <button class="action-button image-action" data-kind="image" type="button">Generate Image</button>
+            <button class="action-button gif-action" data-kind="gif" type="button">Generate GIF</button>
+            <button class="action-button video-action" data-kind="video" type="button">Generate Video</button>
+            <button class="action-button audio-action" data-kind="audio" type="button">Generate Audio</button>
+          </div>
+
+          <div class="progress-panel">
+            <div class="progress-track" aria-hidden="true">
+              <div id="progressFill" class="progress-fill"></div>
+            </div>
+            <div class="progress-meta">
+              <strong id="progressPhase">Idle</strong>
+              <span id="progressMessage">Select a model, type a prompt, and generate something.</span>
+            </div>
+            <div id="gpuTelemetryPanel" class="gpu-telemetry-panel hidden">
+              <div class="gpu-telemetry-head">
+                <strong id="gpuTelemetryLabel">ECG Window</strong>
+                <span id="gpuTelemetryValue">--%</span>
+              </div>
+              <svg id="gpuTelemetrySparkline" class="gpu-telemetry-sparkline" viewBox="0 0 180 44" preserveAspectRatio="none" aria-hidden="true">
+                <path id="gpuTelemetryArea" class="gpu-telemetry-area" d=""></path>
+                <polyline id="gpuTelemetryLine" class="gpu-telemetry-line" points=""></polyline>
+              </svg>
+              <span id="gpuTelemetryNote" class="gpu-telemetry-note">ECG-style view of the busiest local Windows GPU engine, similar to Task Manager.</span>
+            </div>
+          </div>
+
+          <div class="reference-banner">
+            <span class="reference-label">Assigned Inputs</span>
+            <strong id="selectedReferenceName">Primary: none | End: none | Control: none</strong>
+          </div>
+        </article>
+      </section>
+
+      <section class="center-column">
+        <article class="panel preview-panel">
+          <div class="panel-header">
+            <h2>Preview</h2>
+            <div class="panel-header-actions">
+              <span class="panel-note">Latest output or selected history item</span>
+              <button id="toggleCenterColumn" class="ghost-button" type="button">Hide</button>
+            </div>
+          </div>
+          <div id="previewSurface" class="preview-surface empty">
+            <div class="empty-state">
+              <strong>No output yet</strong>
+              <p>Your latest image, video, or audio file will appear here with inline preview controls.</p>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-header">
+            <h2>Recent Outputs</h2>
+            <span class="panel-note">Saved files from <code>outputs/</code></span>
+          </div>
+          <div id="historyGrid" class="history-grid"></div>
+        </article>
+      </section>
+
+      <aside class="tray tray-open" id="tray">
+        <div class="tray-header">
+          <div>
+            <h2>Input Tray</h2>
+            <p>Optional reference or edit source media from <code>input/</code> and previously generated files from <code>outputs/</code>.</p>
+          </div>
+          <button id="toggleTray" class="ghost-button" type="button">Hide</button>
+        </div>
+
+        <div class="tray-toolbar">
+          <button class="tray-filter active" data-filter="all" type="button">All</button>
+          <button class="tray-filter" data-filter="image" type="button">Images</button>
+          <button class="tray-filter" data-filter="video" type="button">Video</button>
+          <button class="tray-filter" data-filter="audio" type="button">Audio</button>
+          <button id="clearReference" class="ghost-button" type="button">Clear Slots</button>
+        </div>
+
+        <div class="tray-asset-sections">
+          <section class="tray-asset-section">
+            <div class="tray-section-header">
+              <strong>Input Folder</strong>
+              <span>Files from <code>input/</code></span>
+            </div>
+            <div id="inputAssetList" class="asset-list"></div>
+          </section>
+
+          <section class="tray-asset-section">
+            <div class="tray-section-header">
+              <strong>Output Folder</strong>
+              <span>Files from <code>outputs/</code></span>
+            </div>
+            <div id="outputAssetList" class="asset-list"></div>
+          </section>
+        </div>
+        <div class="reference-mode-panel">
+          <div class="reference-mode-copy">
+            <strong>Assign the selected file</strong>
+            <span id="referenceModeNote">Choose a file first. Guide uses it as inspiration. Edit treats it as the source to transform.</span>
+          </div>
+          <div class="reference-mode-switch" aria-label="Reference use">
+            <button id="referenceGuide" class="reference-mode active" type="button">Use as Guide</button>
+            <button id="referenceEdit" class="reference-mode" type="button">Edit Selected</button>
+            <button id="referenceEnd" class="reference-mode" type="button">Set as End Frame</button>
+            <button id="referenceControl" class="reference-mode" type="button">Use as Control Video</button>
+          </div>
+        </div>
+        <div id="referenceAssignments" class="reference-assignments"></div>
+        <div id="trayPreview" class="tray-preview"></div>
+      </aside>
+    </main>
+  </div>
+
+  <div class="show-column-dock">
+    <button id="showLeftColumn" class="show-column hidden" type="button">Controls</button>
+    <button id="showCenterColumn" class="show-column hidden" type="button">Outputs</button>
+    <button id="showTray" class="show-column hidden" type="button">Input Tray</button>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
