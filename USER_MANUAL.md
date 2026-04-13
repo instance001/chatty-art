@@ -754,6 +754,12 @@ In `Basic`, Chatty-art can show three separate prompt boxes:
 - `Words / Script` or `Words / Sounds`
   This is the literal box. Use it for exact spoken words or direct sound cues that should be preserved more directly.
 
+For realism speech models, the tray can also show:
+
+- `Use as Voice Reference`
+  Choose an audio clip from either `Input Folder` or `Output Folder`, then assign it as the voice reference.
+  Chatty-art will hand that audio file to `OuteTTS` as the cloning reference for the generated speech.
+
 In `Advanced`, the literal box can expand into a sequence builder:
 
 - click `Add new prompt box` to add another speech or sound segment
@@ -767,6 +773,7 @@ Plain-language meaning:
 - `Negative Prompt` = what to avoid
 - `Words / Script` = exactly what should be spoken
 - `Words / Sounds` = literal ingredient list of sound cues
+- `Voice Reference` = whose voice to imitate
 
 ### Basic vs Advanced
 
@@ -795,6 +802,7 @@ Use:
 
 - `Prompt` for delivery direction
 - `Words / Script` for the exact line to say
+- `Voice Reference` for an audio clip whose voice you want OuteTTS to imitate
 
 Good beginner example:
 
@@ -803,10 +811,20 @@ Good beginner example:
 - `Words / Script`
   `Welcome to Chatty-art. Everything is running locally on this machine.`
 
+Good beginner example with cloning:
+
+- `Prompt`
+  `calm male narration, clear pacing, warm tone, slight radio texture`
+- `Words / Script`
+  `The local generation run is complete.`
+- `Voice Reference`
+  `short prerecorded voice clip from the tray`
+
 Simple advice:
 
 - Put the exact spoken sentence in `Words / Script`
 - Put voice, tone, speed, mood, and delivery notes in `Prompt`
+- Put the speaker you want copied in `Voice Reference`
 - Use `Negative Prompt` for things like robotic delivery, harsh sibilance, mumbling, noisy background, or clipping
 
 In `Advanced` mode:
@@ -892,6 +910,7 @@ For speech models, look for:
 
 - `Prepared Spoken Text`
 - `Speech Direction`
+- `Voice reference` if you assigned a cloning clip from the tray
 
 For sound models, look for:
 
@@ -940,6 +959,8 @@ For realism sound models, Prompt Assist only expands the descriptive prompt and 
 The literal `Words / Script` or `Words / Sounds` boxes stay verbatim and are not rewritten by Prompt Assist.
 
 For realism audio models, the `Words / Script` or `Words / Sounds` field is the best place for verbatim content.
+
+For realism speech models, `Voice Reference` also stays separate from Prompt Assist and is passed through as the cloning clip.
 
 ## What each setting means
 
@@ -1074,6 +1095,8 @@ If you want to use an existing file during generation:
      Good when you want the selected file to act like inspiration, composition guidance, or a soft steering cue.
    - `Edit Selected`
      Good when you want Chatty-art to treat the selected file as the source it should transform.
+   - `Use as Voice Reference`
+     Good for realism speech models such as `OuteTTS` when you want Chatty-art to clone the voice from a prerecorded audio clip.
    - `Set as End Frame`
      Good for supported video workflows when you want the clip to finish on a particular still image.
    - `Use as Control Video`
@@ -1082,7 +1105,7 @@ If you want to use an existing file during generation:
 
 The assigned file and its current use appear in the tray slots:
 
-- `Primary input`
+- `Primary input` or `Voice reference`
 - `End frame`
 - `Control video`
 
@@ -1092,7 +1115,7 @@ Important:
 
 - `Expressive` mode can use the selected file as a guide or edit/source cue during planning.
 - `Realism` mode uses tray-selected still images for guide/edit workflows, including files from `input/` and previously generated output images.
-- `Realism` does not currently use audio files as references.
+- `Realism` speech models like `OuteTTS` can use tray-selected audio files as a `Voice Reference`.
 - Some realism video families can also use:
   - `Set as End Frame`
   - `Use as Control Video`

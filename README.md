@@ -19,6 +19,7 @@ Chatty-art is a simple local image/GIF/video/audio generator with:
 - Collapsible `Controls`, `Outputs`, and `Input Tray` columns for easier layout management
 - Optional `Prompt Assist` compiler that expands short prompts into richer local briefs before generation
 - Dedicated audio `Words / Script` or `Words / Sounds` box for realism audio models
+- Dedicated `Voice Reference` tray assignment for realism speech models like `OuteTTS`
 - `Basic / Advanced` prompt mode split, so the beginner path stays simple while advanced users get deeper controls
 - Advanced audio sequencing with reusable voice/layer names, plus `after last box` or `same time as last box` timing
 
@@ -193,6 +194,12 @@ In `Basic`, Chatty-art can show three different text boxes:
   For speech models like `OuteTTS`, use it for the exact words you want spoken.
   For sound models like `Stable Audio Open`, use it for literal cue words you want preserved, like `dripping water, distant thunder, crackling fire`.
 
+For realism speech models, the Input Tray can also show:
+
+- `Use as Voice Reference`
+  Choose an audio clip from either `Input Folder` or `Output Folder`, then assign it as the voice reference.
+  Chatty-art will hand that audio file to `OuteTTS` as the cloning reference for the generated speech.
+
 In `Advanced`, audio models can expand that literal lane into a sequence builder:
 
 - Add multiple boxes with `Add new prompt box`
@@ -211,9 +218,12 @@ Beginner rule:
 
 - speech model:
   - `Prompt` = how it should sound
+  - `Negative Prompt` = what to avoid in the delivery
   - `Words / Script` = exactly what should be said
+  - `Voice Reference` = whose voice to imitate
 - soundscape model:
   - `Prompt` = overall scene and texture
+  - `Negative Prompt` = what to avoid in the sound design
   - `Words / Sounds` = literal cue list
 
 Example speech setup:
@@ -222,6 +232,15 @@ Example speech setup:
   `warm Australian female voice, calm pacing, clear diction, close microphone, gentle smile`
 - `Words / Script`
   `Welcome to Chatty-art. Local generation is ready.`
+
+Example speech setup with cloning:
+
+- `Prompt`
+  `calm male narration, clear pacing, warm tone, slight radio texture`
+- `Words / Script`
+  `The local generation run is complete.`
+- `Voice Reference`
+  `short prerecorded voice clip from the tray`
 
 Example soundscape setup:
 
@@ -311,6 +330,7 @@ The app opens at `http://127.0.0.1:7878`.
 - For the cleanest first realism setup, prefer the exact 6-file starter stack listed above.
 - The Input Tray now shows both `Input Folder` files and `Output Folder` files so you can reuse generated material without moving it by hand.
 - The Input Tray lets you choose whether the selected file should be used as a `Guide` or treated as the image to `Edit`.
+- For realism speech models, the Input Tray also lets you assign an audio clip as `Voice Reference`.
 - The dashboard columns can be collapsed with `Hide` and restored from the bottom-right dock as `Controls`, `Outputs`, and `Input Tray`.
 - In realism mode, still-image references can be selected from the tray, including files from `input/` or previously generated output images.
 - Realism audio uses specialist backends alongside the realism visual lane:
@@ -325,6 +345,7 @@ The app opens at `http://127.0.0.1:7878`.
 - For realism speech models, Prompt Assist now separates spoken words from delivery direction.
 - For realism sound models, Prompt Assist only expands the descriptive prompt and negative prompt.
 - For realism audio models, the `Words / Script` or `Words / Sounds` field is the best place for verbatim content.
+- For realism speech models, `Voice Reference` stays separate from Prompt Assist and is passed through as the cloning clip.
 - `Generate GIF` and `Generate Video` are separate on purpose. GIF is usually the easier preview/share format, while true local video depends on the selected realism family.
 - GIF/video settings include clip resolution, duration, and FPS.
 - `Low VRAM Mode` uses a safer realism launch profile that spills more work to CPU and tiles VAE decode when needed.

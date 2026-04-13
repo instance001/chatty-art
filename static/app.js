@@ -125,6 +125,7 @@ const elements = {
   referenceEdit: document.getElementById("referenceEdit"),
   referenceEnd: document.getElementById("referenceEnd"),
   referenceControl: document.getElementById("referenceControl"),
+  referenceVoice: document.getElementById("referenceVoice"),
   referenceModeNote: document.getElementById("referenceModeNote"),
   referenceAssignments: document.getElementById("referenceAssignments"),
   tray: document.getElementById("tray"),
@@ -164,6 +165,7 @@ elements.refreshAll.addEventListener("click", () => {
   refreshEverything();
 });
 elements.clearReference.addEventListener("click", () => clearReferenceSlots());
+elements.referenceVoice.addEventListener("click", () => assignSelectedReference("primary", "guide"));
 elements.referenceGuide.addEventListener("click", () => assignSelectedReference("primary", "guide"));
 elements.referenceEdit.addEventListener("click", () => assignSelectedReference("primary", "edit"));
 elements.referenceEnd.addEventListener("click", () => assignSelectedReference("end"));
@@ -1540,7 +1542,7 @@ function renderTrayPreview() {
   const media = createMediaMarkup(asset, "tray-media");
   const assignments = [];
   if (state.primaryReference?.id === asset.id) {
-    assignments.push(`Start image | ${referenceIntentLabel(state.referenceIntent)}`);
+    assignments.push(primaryReferenceAssignmentLabel());
   }
   if (state.endReference?.id === asset.id) {
     assignments.push("End frame");
@@ -1557,10 +1559,46 @@ function renderTrayPreview() {
   `;
 }
 
+function isSpeechVoiceReferenceModel(model = getSelectedModel()) {
+  return Boolean(
+    state.generationStyle === "realism"
+    && model
+    && model.backend === "audio_runtime"
+    && model.supports_voice_output
+  );
+}
+
+function primaryReferenceSlotLabel(model = getSelectedModel()) {
+  return isSpeechVoiceReferenceModel(model) ? "Voice reference" : "Primary input";
+}
+
+function primaryReferenceAssignmentLabel(model = getSelectedModel()) {
+  return isSpeechVoiceReferenceModel(model)
+    ? "Voice reference"
+    : `Start image | ${referenceIntentLabel(state.referenceIntent)}`;
+}
+
+function primaryReferenceEmptyDetail(model = getSelectedModel()) {
+  return isSpeechVoiceReferenceModel(model)
+    ? "No voice reference assigned."
+    : "No primary guide/edit input assigned.";
+}
+
+function primaryReferenceFilledDetail(model = getSelectedModel()) {
+  return isSpeechVoiceReferenceModel(model)
+    ? "Used to clone the speaker voice for realism speech generation."
+    : `${referenceIntentLabel(state.referenceIntent)}`;
+}
+
 function renderReferenceIntentControls() {
   const context = getReferenceAssignmentContext();
   const selectedAssetId = state.selectedReference?.id;
+  const speechVoiceModel = isSpeechVoiceReferenceModel();
 
+  elements.referenceVoice.classList.toggle(
+    "active",
+    speechVoiceModel && state.primaryReference?.id === selectedAssetId
+  );
   elements.referenceGuide.classList.toggle(
     "active",
     state.primaryReference?.id === selectedAssetId && state.referenceIntent === "guide"
@@ -1572,6 +1610,13 @@ function renderReferenceIntentControls() {
   elements.referenceEnd.classList.toggle("active", state.endReference?.id === selectedAssetId);
   elements.referenceControl.classList.toggle("active", state.controlReference?.id === selectedAssetId);
 
+  elements.referenceVoice.classList.toggle("hidden", !speechVoiceModel);
+  elements.referenceGuide.classList.toggle("hidden", speechVoiceModel);
+  elements.referenceEdit.classList.toggle("hidden", speechVoiceModel);
+  elements.referenceEnd.classList.toggle("hidden", speechVoiceModel);
+  elements.referenceControl.classList.toggle("hidden", speechVoiceModel);
+
+  elements.referenceVoice.disabled = !context.voiceEnabled;
   elements.referenceGuide.disabled = !context.guideEnabled;
   elements.referenceEdit.disabled = !context.editEnabled;
   elements.referenceEnd.disabled = !context.endEnabled;
@@ -1585,7 +1630,19 @@ function getReferenceAssignmentContext() {
   const asset = state.selectedReference;
 
   if (!asset) {
+    if (isSpeechVoiceReferenceModel(model)) {
+      return {
+        voiceEnabled: false,
+        guideEnabled: false,
+        editEnabled: false,
+        endEnabled: false,
+        controlEnabled: false,
+        message: "Choose an audio file first. Voice Reference assigns a prerecorded clip for speech cloning.",
+      };
+    }
+
     return {
+      voiceEnabled: false,
       guideEnabled: false,
       editEnabled: false,
       endEnabled: false,
@@ -1596,6 +1653,7 @@ function getReferenceAssignmentContext() {
 
   if (!model) {
     return {
+      voiceEnabled: false,
       guideEnabled: false,
       editEnabled: false,
       endEnabled: false,
@@ -1604,8 +1662,44 @@ function getReferenceAssignmentContext() {
     };
   }
 
+  if (isSpeechVoiceReferenceModel(model)) {
+    if (!model.runtime_supported) {
+      return {
+        voiceEnabled: false,
+        guideEnabled: false,
+        editEnabled: false,
+        endEnabled: false,
+        controlEnabled: false,
+        message: "This speech model is not ready yet, so voice-reference assignment is disabled.",
+      };
+    }
+
+    if (!model.supports_audio_reference) {
+      return {
+        voiceEnabled: false,
+        guideEnabled: false,
+        editEnabled: false,
+        endEnabled: false,
+        controlEnabled: false,
+        message: "This speech model does not use voice-reference cloning in Chatty-art yet.",
+      };
+    }
+
+    return {
+      voiceEnabled: asset.kind === "audio",
+      guideEnabled: false,
+      editEnabled: false,
+      endEnabled: false,
+      controlEnabled: false,
+      message: asset.kind === "audio"
+        ? "Assign this audio file as the voice reference for realism speech generation."
+        : "Speech voice cloning uses an audio file from the tray as the voice reference.",
+    };
+  }
+
   if (state.generationStyle === "expressive") {
     return {
+      voiceEnabled: false,
       guideEnabled: true,
       editEnabled: true,
       endEnabled: false,
@@ -1624,6 +1718,7 @@ function getReferenceAssignmentContext() {
       && !model.requires_end_image_reference
       && !model.supports_video_reference) {
     return {
+      voiceEnabled: false,
       guideEnabled: false,
       editEnabled: false,
       endEnabled: false,
@@ -1636,6 +1731,7 @@ function getReferenceAssignmentContext() {
     const guideEnabled = model.supports_image_reference || model.requires_reference;
     const endEnabled = model.supports_end_image_reference || model.requires_end_image_reference;
     return {
+      voiceEnabled: false,
       guideEnabled,
       editEnabled: guideEnabled,
       endEnabled,
@@ -1648,6 +1744,7 @@ function getReferenceAssignmentContext() {
 
   if (asset.kind === "video" || asset.kind === "gif") {
     return {
+      voiceEnabled: false,
       guideEnabled: false,
       editEnabled: false,
       endEnabled: false,
@@ -1659,6 +1756,7 @@ function getReferenceAssignmentContext() {
   }
 
   return {
+    voiceEnabled: false,
     guideEnabled: false,
     editEnabled: false,
     endEnabled: false,
@@ -1689,7 +1787,7 @@ function renderPreview() {
       <p>${escapeHtml(item.prompt || "Saved output")}</p>
       ${item.resolution_label ? `<p><strong>Output settings:</strong> ${escapeHtml(item.resolution_label)}</p>` : ""}
       ${item.negative_prompt ? `<p><strong>Negative prompt:</strong> ${escapeHtml(item.negative_prompt)}</p>` : ""}
-      ${item.reference_asset ? `<p><strong>Reference use:</strong> ${escapeHtml(referenceIntentLabel(item.reference_intent || "guide"))} via ${escapeHtml(item.reference_asset)}</p>` : ""}
+      ${item.reference_asset ? `<p><strong>${escapeHtml(item.kind === "audio" && item.spoken_text ? "Voice reference" : "Reference use")}:</strong> ${escapeHtml(item.kind === "audio" && item.spoken_text ? item.reference_asset : `${referenceIntentLabel(item.reference_intent || "guide")} via ${item.reference_asset}`)}</p>` : ""}
       ${item.end_reference_asset ? `<p><strong>End frame:</strong> ${escapeHtml(item.end_reference_asset)}</p>` : ""}
       ${item.control_reference_asset ? `<p><strong>Control video:</strong> ${escapeHtml(item.control_reference_asset)}</p>` : ""}
       ${item.spoken_text ? `<p><strong>Spoken text:</strong> ${escapeHtml(item.spoken_text)}</p>` : ""}
@@ -1735,28 +1833,40 @@ function renderHistory() {
 }
 
 function renderAssignedReferences() {
-  const slots = [
-    {
-      key: "primary",
-      label: "Primary input",
-      asset: state.primaryReference,
-      detail: state.primaryReference
-        ? `${referenceIntentLabel(state.referenceIntent)}`
-        : "No primary guide/edit input assigned.",
-    },
-    {
-      key: "end",
-      label: "End frame",
-      asset: state.endReference,
-      detail: state.endReference ? "Used as the final still frame for FLF2V-style video generation." : "No end frame assigned.",
-    },
-    {
-      key: "control",
-      label: "Control video",
-      asset: state.controlReference,
-      detail: state.controlReference ? "Used as motion guidance for VACE-style video generation." : "No control video assigned.",
-    },
-  ];
+  const model = getSelectedModel();
+  const slots = isSpeechVoiceReferenceModel(model)
+    ? [
+        {
+          key: "primary",
+          label: primaryReferenceSlotLabel(model),
+          asset: state.primaryReference,
+          detail: state.primaryReference
+            ? primaryReferenceFilledDetail(model)
+            : primaryReferenceEmptyDetail(model),
+        },
+      ]
+    : [
+        {
+          key: "primary",
+          label: primaryReferenceSlotLabel(model),
+          asset: state.primaryReference,
+          detail: state.primaryReference
+            ? primaryReferenceFilledDetail(model)
+            : primaryReferenceEmptyDetail(model),
+        },
+        {
+          key: "end",
+          label: "End frame",
+          asset: state.endReference,
+          detail: state.endReference ? "Used as the final still frame for FLF2V-style video generation." : "No end frame assigned.",
+        },
+        {
+          key: "control",
+          label: "Control video",
+          asset: state.controlReference,
+          detail: state.controlReference ? "Used as motion guidance for VACE-style video generation." : "No control video assigned.",
+        },
+      ];
 
   elements.referenceAssignments.innerHTML = slots
     .map((slot) => `
@@ -1828,12 +1938,16 @@ function clearReferenceSlots() {
 }
 
 function formatAssignedReferenceBanner() {
+  const primaryLabel = primaryReferenceSlotLabel();
   const primary = state.primaryReference
-    ? `${state.primaryReference.name} (${referenceIntentLabel(state.referenceIntent)})`
+    ? `${state.primaryReference.name} (${primaryReferenceFilledDetail()})`
     : "none";
+  if (isSpeechVoiceReferenceModel()) {
+    return `${primaryLabel}: ${primary}`;
+  }
   const end = state.endReference ? state.endReference.name : "none";
   const control = state.controlReference ? state.controlReference.name : "none";
-  return `Primary: ${primary} | End: ${end} | Control: ${control}`;
+  return `${primaryLabel}: ${primary} | End: ${end} | Control: ${control}`;
 }
 
 function reconcileAssignedAssets() {
@@ -1860,6 +1974,20 @@ function normalizeAssignedReferencesForCurrentModel() {
   }
 
   if (!model) {
+    return;
+  }
+
+  if (isSpeechVoiceReferenceModel(model)) {
+    if (state.primaryReference) {
+      const primarySupported =
+        state.primaryReference.kind === "audio" && model.supports_audio_reference;
+      if (!primarySupported) {
+        state.primaryReference = null;
+      }
+    }
+
+    state.endReference = null;
+    state.controlReference = null;
     return;
   }
 
