@@ -704,6 +704,9 @@ Chatty-art now has a few helper features that make it easier to stay inside the 
 - `ECG Window`
   On Windows, the progress area can show a little live GPU graph during generation. It is an ECG-style "heartbeat" view of local GPU activity, similar to the Task Manager performance graph.
 
+- Advanced realism controls
+  In `Realism + Advanced`, Chatty-art can show extra tuning controls like `Sampler`, `Scheduler`, `Reference Strength`, `Flow Shift`, `Manual Focus Cues`, `Manual Defaults / Assumptions`, and family-aware `LoRA` controls when the selected model family supports them.
+
 - Collapsible columns
   The `Controls`, `Outputs`, and `Input Tray` columns can be hidden with `Hide` and brought back from the small button dock near the bottom-right of the app.
 
@@ -732,6 +735,314 @@ If the output feels vague, add:
 - lighting
 - motion words for GIF or video
 - sound words for audio
+
+## Advanced realism controls
+
+`Basic` mode is still the best place to start.
+
+But if you switch to `Realism + Advanced`, Chatty-art can show extra realism controls for models that support them.
+
+These controls are optional. They are meant for experimenting, not for the first run.
+
+### Sampler
+
+This changes the main sampling method used by the realism backend.
+
+Simple advice:
+
+- if you do not know what this means, leave it on `Euler`
+- change it only when you are intentionally comparing realism behavior
+
+### Scheduler
+
+This changes how noise is distributed across the run.
+
+Simple advice:
+
+- leave it on `Auto / Runtime Default` unless you are intentionally testing combinations
+- if you changed the sampler and want to experiment further, change one setting at a time
+
+### Reference Strength
+
+This only appears when:
+
+- the selected realism model supports still-image reference strength
+- and the current workflow is actually using a reference image
+
+Plain-language meaning:
+
+- higher = stay closer to the reference image
+- lower = let the model drift further away and reinterpret more freely
+
+This is especially useful when you are using a guide/edit image and want more or less freedom.
+
+### Flow Shift
+
+This only appears for model families that use it, especially flow-style families like `Wan` and `Qwen`.
+
+Plain-language meaning:
+
+- this is an advanced tuning control for those families
+- if you are not intentionally experimenting, leave it at the default
+
+### Manual Focus Cues
+
+This gives you a place to type your own short visual steering cues directly into the realism handoff.
+
+Plain-language meaning:
+
+- use this box for important visual ideas you do not want the handoff to miss
+- think in short cue phrases, not long sentences
+- Chatty-art pushes these cues into the prepared realism prompt even if Prompt Assist is off
+
+Good examples:
+
+- `golden hour`
+- `shallow depth of field`
+- `wet pavement`
+- `cinematic framing`
+- `backlit portrait`
+
+When to use it:
+
+- Prompt Assist missed something important
+- you want more control without rewriting the whole prompt
+- you know the exact visual emphasis you want
+
+### Manual Defaults / Assumptions
+
+This gives you a place to type the sensible defaults you want the realism handoff to assume.
+
+Plain-language meaning:
+
+- use this box for concrete background assumptions
+- these are the details you want Chatty-art to treat as true unless your prompt already says otherwise
+
+Good examples:
+
+- `adult woman`
+- `modern city street`
+- `stormy coast`
+- `overcast afternoon`
+- `wide-angle photo`
+
+When to use it:
+
+- your prompt is short but you already know a few key defaults
+- you do not want Prompt Assist making those decisions for you
+- you want the handoff to stay more grounded and specific
+
+### LoRA
+
+This only appears when:
+
+- the selected realism model family supports LoRAs
+- and you have compatible LoRA files available locally
+
+Where LoRA files go:
+
+- `models/loras/flux/`
+- `models/loras/sd/`
+- `models/loras/sd3/`
+- `models/loras/wan/`
+
+Supported LoRA file types:
+
+- `.safetensors`
+- `.ckpt`
+
+Plain-language meaning:
+
+- a LoRA is a small add-on that nudges the base model toward a style, subject, look, or behavior
+- Chatty-art currently supports one LoRA at a time in `Realism + Advanced`
+- Chatty-art only shows LoRAs that match the selected model family
+
+### LoRA Weight
+
+Plain-language meaning:
+
+- lower = gentler effect
+- higher = stronger LoRA influence
+
+Beginner advice:
+
+- start around `1.0`
+- if the LoRA is overpowering the image, lower it
+- if the LoRA is barely doing anything, raise it slowly
+
+### Beginner rule
+
+If you are new:
+
+- use `Basic` first
+- only move to `Realism + Advanced` when you actually want to test a change
+- start with:
+  - `Sampler = Euler`
+  - `Scheduler = Auto / Runtime Default`
+  - `Reference Strength = default`
+  - `Flow Shift = default`
+- leave `Manual Focus Cues` and `Manual Defaults / Assumptions` empty unless you know exactly what you want to add
+- `LoRA = off` until the base model is already behaving the way you want
+- change one thing at a time
+
+That makes it much easier to tell what helped and what made the output worse.
+
+## LoRA guide
+
+This section is for people who have seen the word `LoRA` but do not really know what it means yet.
+
+### What a LoRA is
+
+`LoRA` stands for `Low-Rank Adaptation`.
+
+You do not need to remember the technical words. The useful meaning is:
+
+- a LoRA is a small add-on file
+- it changes how a base model behaves
+- it can push the model toward a style, subject, character look, lighting feel, outfit style, camera vibe, or other visual bias
+- it is not a full replacement for the main model
+
+Simple mental model:
+
+- base model = the main engine
+- LoRA = a bolt-on tuning pack
+
+So if you are using:
+
+- a `FLUX` model, the `FLUX` model is still doing the generation
+- the LoRA is just nudging it in a more specific direction
+
+### What LoRAs are good for
+
+People usually use LoRAs for things like:
+
+- a specific illustration style
+- a particular photo aesthetic
+- clothing or fashion styles
+- character appearance tendencies
+- stronger camera or lighting vibes
+- object or environment themes
+
+They are often a fast way to get a look that would otherwise take a lot of prompt trial and error.
+
+### What LoRAs are not
+
+LoRAs are not magic.
+
+They do not:
+
+- fix a bad base model
+- turn the wrong model family into the right one
+- always work well at high strength
+- automatically match every realism model
+
+If the base model is fighting you already, fix that first before adding a LoRA.
+
+### How Chatty-art handles LoRAs
+
+In Chatty-art today:
+
+- LoRAs are available in `Realism + Advanced`
+- Chatty-art currently supports one LoRA at a time
+- Chatty-art only shows LoRAs that match the selected model family
+
+That means Chatty-art is trying to protect you from obvious mismatches.
+
+### Where LoRA files go
+
+Put LoRAs into one of these folders:
+
+- `models/loras/flux/`
+- `models/loras/sd/`
+- `models/loras/sd3/`
+- `models/loras/wan/`
+
+Supported file types:
+
+- `.safetensors`
+- `.ckpt`
+
+You do not put LoRAs loose in the project root.
+You also do not mix all families in one anonymous folder if you can help it.
+
+### Matching the right LoRA to the right base model
+
+This is the part that trips people up most often.
+
+Use:
+
+- `FLUX` LoRAs with `FLUX` models
+- `Stable Diffusion 1.x / 2.x` style LoRAs with the general `sd` family
+- `SD3 / SD3.5` LoRAs with `sd3`
+- `Wan` LoRAs with `wan`
+
+If the family does not match, one of these usually happens:
+
+- the LoRA does not appear in the dropdown
+- the output looks broken or weak
+- the LoRA simply does not meaningfully affect the result
+
+### Tips for finding LoRAs
+
+The easiest beginner search formula is:
+
+- model family name
+- plus `LoRA`
+- plus `safetensors`
+
+Examples:
+
+- `FLUX LoRA safetensors`
+- `Stable Diffusion 1.5 LoRA safetensors`
+- `SD3 LoRA safetensors`
+- `Wan LoRA safetensors`
+
+What to look for on the model page:
+
+- does it clearly say what base family it was trained for?
+- are the example images in the same ecosystem as the model you are using?
+- does it look like a real LoRA file, not a full checkpoint?
+
+Good beginner rule:
+
+- if the page does not clearly say what family it belongs to, skip it
+- if it seems made for a different family than your model, skip it
+- if it looks confusing, keep browsing until you find a clearer one
+
+### Beginner way to test a LoRA
+
+The safest test flow is:
+
+1. Get the base model working first with no LoRA.
+2. Generate a result you already roughly like.
+3. Turn on one LoRA.
+4. Leave the other advanced controls alone.
+5. Start around `LoRA Weight = 1.0`.
+6. Compare before and after.
+
+If the LoRA is too strong:
+
+- lower the weight
+
+If the LoRA is too weak:
+
+- raise the weight slowly
+
+### Signs a LoRA is a bad fit
+
+Common warning signs:
+
+- the output becomes muddy or overcooked
+- everything starts looking like the same strange style
+- faces, anatomy, or objects get worse instead of better
+- the LoRA effect is barely noticeable even at higher weights
+
+If that happens:
+
+- turn the LoRA off
+- confirm the base model is still healthy
+- try a different LoRA
+- or try a LoRA from the correct family
 
 ## Audio prompt workflow
 
@@ -795,6 +1106,7 @@ Beginner advice:
 - Start in `Basic`
 - Move to `Advanced` only when you actually need multiple segments
 - Reuse the same name if you want the same identity to come back
+- `Preview Handoff` is available in both `Basic` and `Advanced`, so you do not need to enter advanced mode just to review the request before generation
 
 ### For OuteTTS speech models
 
@@ -925,6 +1237,27 @@ In `Advanced` mode, the handoff is still per backend:
 
 Right now Chatty-art does **not** merge those two backends into one combined audio render. Speech and sound stay in their own specialist lanes for now.
 
+## Preview Handoff for realism images and video
+
+In visual `Realism` mode, the `Preview Handoff` panel is where you can check what Chatty-art is actually about to send to the model.
+
+This is especially useful in `Realism + Advanced`.
+
+Look for:
+
+- the prepared prompt
+- the effective negative prompt
+- any `Manual Focus Cues` you added
+- any `Manual Defaults / Assumptions` you added
+- the note explaining what was added to the handoff
+
+Simple advice:
+
+- if the handoff looks wrong, do not generate yet
+- fix the prompt or your manual cue/default boxes first
+- use `Manual Focus Cues` for visual priorities
+- use `Manual Defaults / Assumptions` for concrete background facts
+
 ## Prompt Assist
 
 Chatty-art now includes `Prompt Assist`.
@@ -961,6 +1294,13 @@ The literal `Words / Script` or `Words / Sounds` boxes stay verbatim and are not
 For realism audio models, the `Words / Script` or `Words / Sounds` field is the best place for verbatim content.
 
 For realism speech models, `Voice Reference` also stays separate from Prompt Assist and is passed through as the cloning clip.
+
+For visual realism in `Advanced`, Prompt Assist also stays separate from your manual handoff controls:
+
+- `Manual Focus Cues` are your own extra visual steering phrases
+- `Manual Defaults / Assumptions` are your own explicit defaults
+
+Those boxes are useful when Prompt Assist does not quite give you the handoff you wanted.
 
 ## What each setting means
 

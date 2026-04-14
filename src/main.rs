@@ -57,9 +57,9 @@ use crate::{
     types::{
         AssetSource, BackendRuntimeStatus, EstimateConfidence, GenerateAccepted,
         GenerateRequest, GenerationSettings, GenerationStyle, HardwareProfile, InputAsset,
-        MediaKind, ModelBackend, ModelInfo, OutputEntry, PrepareResponse, PromptAssistMode,
-        ReferenceSummary, ResolutionPreset, RuntimeAcceleration, RuntimeStatus, ServerEvent,
-        TimeEstimate, VideoResolutionPreset,
+        LoraInfo, MediaKind, ModelBackend, ModelInfo, OutputEntry, PrepareResponse,
+        PromptAssistMode, ReferenceSummary, ResolutionPreset, RuntimeAcceleration,
+        RuntimeStatus, ServerEvent, TimeEstimate, VideoResolutionPreset,
     },
 };
 
@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
         .route("/app.js", get(app_js))
         .route("/styles.css", get(styles_css))
         .route("/api/models", get(list_models))
+        .route("/api/loras", get(list_loras))
         .route("/api/runtime", get(runtime_status))
         .route("/api/hardware", get(hardware_profile_status))
         .route("/api/telemetry/gpu", get(gpu_telemetry_status))
@@ -280,6 +281,12 @@ async fn list_models(State(state): State<AppState>) -> ApiResult<Vec<ModelInfo>>
     )
     .map(Json)
     .map_err(internal_error)
+}
+
+async fn list_loras(State(state): State<AppState>) -> ApiResult<Vec<LoraInfo>> {
+    scan_loras(&state.paths.models_dir)
+        .map(Json)
+        .map_err(internal_error)
 }
 
 async fn runtime_status(State(state): State<AppState>) -> ApiResult<RuntimeStatus> {
@@ -571,6 +578,7 @@ async fn list_outputs(State(state): State<AppState>) -> ApiResult<Vec<OutputEntr
 struct ResolvedGenerateContext {
     request: GenerateRequest,
     model: ModelInfo,
+    selected_lora: Option<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
     reference_asset: Option<InputAsset>,
     end_reference_asset: Option<InputAsset>,
@@ -651,6 +659,8 @@ async fn prepare_generate(
         estimated_time,
         hardware_note: state.hardware_profile.note.clone(),
         reference_note: reference_summary.map(|summary| summary.note),
+        selected_lora_name: context.selected_lora.as_ref().map(|lora| lora.name.clone()),
+        selected_lora_weight: context.request.normalized_lora_weight(),
         supports_voice_output: context.model.supports_voice_output,
     }))
 }
@@ -668,6 +678,7 @@ async fn start_generate(
             task_state.clone(),
             job_id,
             context.model,
+            context.selected_lora,
             context.prompt_interpreter_model,
             context.request,
             context.reference_asset,
@@ -785,6 +796,49 @@ fn resolve_generate_context(
             ),
         ));
     }
+
+    let selected_lora = if let Some(requested) = request.selected_lora.as_ref() {
+        let loras = scan_loras(&state.paths.models_dir).map_err(internal_error)?;
+        let lora = loras
+            .iter()
+            .find(|candidate| candidate.id == *requested || candidate.relative_path == *requested)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("LoRA '{}' was not found in models/loras/.", requested),
+                )
+            })?;
+
+        if !lora.runtime_supported {
+            return Err((StatusCode::BAD_REQUEST, lora.compatibility_note.clone()));
+        }
+
+        if model.backend != ModelBackend::StableDiffusionCpp {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "LoRA is currently only available for Realism models that use the stable-diffusion.cpp backend."
+                    .to_string(),
+            ));
+        }
+
+        if !lora_matches_model(&lora, &model) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "'{}' is a {} LoRA, but '{}' expects {}-family LoRAs.",
+                    lora.name,
+                    lora.family,
+                    model.name,
+                    model_lora_family_label(&model)
+                ),
+            ));
+        }
+
+        Some(lora)
+    } else {
+        None
+    };
 
     let assets = scan_assets(&state.paths.input_dir, &state.paths.outputs_dir)
         .map_err(internal_error)?;
@@ -918,6 +972,7 @@ fn resolve_generate_context(
     Ok(ResolvedGenerateContext {
         request,
         model,
+        selected_lora,
         prompt_interpreter_model,
         reference_asset,
         end_reference_asset,
@@ -953,6 +1008,59 @@ fn estimate_audio_sequence_units(request: &GenerateRequest) -> f32 {
     total_end.max(1.0)
 }
 
+fn normalize_manual_prompt_items(values: &[String], limit: usize) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .iter()
+        .map(|value| value.trim().trim_matches(',').to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.to_ascii_lowercase()))
+        .take(limit)
+        .collect()
+}
+
+fn merge_manual_prompt_items(base: &mut Vec<String>, extra: &[String], limit: usize) {
+    let mut seen = base
+        .iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+
+    for value in extra {
+        if base.len() >= limit {
+            break;
+        }
+
+        let key = value.to_ascii_lowercase();
+        if seen.insert(key) {
+            base.push(value.clone());
+        }
+    }
+}
+
+fn append_manual_prompt_note(base: &str, assumptions: &[String], focus_tags: &[String]) -> String {
+    if assumptions.is_empty() && focus_tags.is_empty() {
+        return base.to_string();
+    }
+
+    let mut additions = Vec::new();
+    if !focus_tags.is_empty() {
+        additions.push(format!("Manual focus cues: {}", focus_tags.join(", ")));
+    }
+    if !assumptions.is_empty() {
+        additions.push(format!(
+            "Manual assumptions: {}",
+            assumptions.join(", ")
+        ));
+    }
+
+    let addition = format!("Added to the handoff. {}", additions.join(" "));
+    if base.trim().is_empty() {
+        addition
+    } else {
+        format!("{} {}", base.trim(), addition)
+    }
+}
+
 async fn build_prompt_handoff(
     paths: &AppPaths,
     request: &GenerateRequest,
@@ -962,6 +1070,8 @@ async fn build_prompt_handoff(
     used_seed: u32,
 ) -> Result<PreparedPromptState> {
     let mut effective_request = request.clone();
+    let manual_focus_tags = normalize_manual_prompt_items(&request.manual_focus_tags, 10);
+    let manual_assumptions = normalize_manual_prompt_items(&request.manual_assumptions, 6);
     let is_speech_audio = request.kind == MediaKind::Audio
         && model.backend == ModelBackend::AudioRuntime
         && model.supports_voice_output;
@@ -1010,10 +1120,8 @@ async fn build_prompt_handoff(
         }
         return Ok(PreparedPromptState {
             effective_request,
-            prompt_assist_note: request
-                .prepared_note
-                .clone()
-                .unwrap_or_else(|| {
+            prompt_assist_note: append_manual_prompt_note(
+                &request.prepared_note.clone().unwrap_or_else(|| {
                     if is_speech_audio {
                         "Preview Handoff was reviewed before generation. Only the Spoken Text field will be voiced."
                             .to_string()
@@ -1021,6 +1129,9 @@ async fn build_prompt_handoff(
                         "Preview Handoff was reviewed before generation.".to_string()
                     }
                 }),
+                &manual_assumptions,
+                &manual_focus_tags,
+            ),
             compiled_prompt: request
                 .prepared_prompt
                 .as_deref()
@@ -1029,8 +1140,8 @@ async fn build_prompt_handoff(
                 .map(str::to_string),
             prepared_spoken_text: spoken_text,
             interpreter_model_name: request.prepared_interpreter_model.clone(),
-            assumptions: Vec::new(),
-            focus_tags: Vec::new(),
+            assumptions: manual_assumptions,
+            focus_tags: manual_focus_tags,
             used_original_prompt: false,
             prompt_assist_sidecar: None,
         });
@@ -1049,26 +1160,44 @@ async fn build_prompt_handoff(
             if let Some(direction_text) = direction.as_deref() {
                 effective_request.prompt = direction_text.to_string();
             }
+            if !manual_focus_tags.is_empty() {
+                effective_request.prompt = crate::runtime::polish_manual_prompt_handoff(
+                    &effective_request.prompt,
+                    &manual_focus_tags,
+                    request.style,
+                    request.kind,
+                );
+            }
             return Ok(PreparedPromptState {
                 effective_request,
-                prompt_assist_note: if use_literal_audio_directly {
+                prompt_assist_note: append_manual_prompt_note(if use_literal_audio_directly {
                     "Using the Words / Script field as the verbatim spoken line. Add prompt text above if you want extra delivery direction."
                         .to_string()
                 } else {
                     "Speech handoff separated the words to be spoken from the delivery description. Only the Spoken Text field will be voiced.".to_string()
-                },
+                }.as_str(),
+                &manual_assumptions,
+                &manual_focus_tags),
                 compiled_prompt: direction,
                 prepared_spoken_text: Some(spoken_text),
                 interpreter_model_name: None,
-                assumptions: Vec::new(),
-                focus_tags: Vec::new(),
+                assumptions: manual_assumptions,
+                focus_tags: manual_focus_tags,
                 used_original_prompt: true,
                 prompt_assist_sidecar: None,
             });
         }
+        if !manual_focus_tags.is_empty() {
+            effective_request.prompt = crate::runtime::polish_manual_prompt_handoff(
+                &effective_request.prompt,
+                &manual_focus_tags,
+                request.style,
+                request.kind,
+            );
+        }
         return Ok(PreparedPromptState {
             effective_request,
-            prompt_assist_note: if is_sound_audio && literal_audio_prompt.is_some() {
+            prompt_assist_note: append_manual_prompt_note(&(if is_sound_audio && literal_audio_prompt.is_some() {
                 if use_literal_audio_directly {
                     "Using the Words / Sounds field as the verbatim sound lane. Add prompt text above if you want extra texture or scene description."
                         .to_string()
@@ -1078,12 +1207,14 @@ async fn build_prompt_handoff(
                 }
             } else {
                 String::new()
-            },
+            }),
+            &manual_assumptions,
+            &manual_focus_tags),
             compiled_prompt: None,
             prepared_spoken_text: None,
             interpreter_model_name: None,
-            assumptions: Vec::new(),
-            focus_tags: Vec::new(),
+            assumptions: manual_assumptions,
+            focus_tags: manual_focus_tags,
             used_original_prompt: true,
             prompt_assist_sidecar: None,
         });
@@ -1095,7 +1226,7 @@ async fn build_prompt_handoff(
         )
     })?;
 
-    let compiled = compile_prompt(
+    let mut compiled = compile_prompt(
         &paths.runtime_dir,
         &paths.models_dir,
         interpreter_model,
@@ -1110,6 +1241,8 @@ async fn build_prompt_handoff(
     )
     .await?;
 
+    merge_manual_prompt_items(&mut compiled.brief.assumptions, &manual_assumptions, 6);
+    merge_manual_prompt_items(&mut compiled.brief.focus_tags, &manual_focus_tags, 10);
     let assumptions = compiled.brief.assumptions.clone();
     let focus_tags = compiled.brief.focus_tags.clone();
     let spoken_text = if is_speech_audio {
@@ -1131,6 +1264,12 @@ async fn build_prompt_handoff(
     } else {
         compiled.prompt.clone()
     };
+    let compiled_prompt = crate::runtime::polish_manual_prompt_handoff(
+        &compiled_prompt,
+        &focus_tags,
+        request.style,
+        request.kind,
+    );
     effective_request.prepared_spoken_text = spoken_text.clone();
     effective_request.prompt = if compiled_prompt.trim().is_empty() {
         request.prompt.clone()
@@ -1145,12 +1284,12 @@ async fn build_prompt_handoff(
 
     Ok(PreparedPromptState {
         effective_request,
-        prompt_assist_note: compiled.note.clone(),
+        prompt_assist_note: append_manual_prompt_note(&compiled.note, &manual_assumptions, &manual_focus_tags),
         compiled_prompt: (!compiled_prompt.trim().is_empty()).then_some(compiled_prompt.clone()),
         prepared_spoken_text: spoken_text.clone(),
         interpreter_model_name: Some(interpreter_model.name.clone()),
-        assumptions,
-        focus_tags,
+        assumptions: assumptions.clone(),
+        focus_tags: focus_tags.clone(),
         used_original_prompt: compiled.used_original_prompt,
         prompt_assist_sidecar: Some(PromptAssistTraceSidecar {
             job_id: Uuid::nil(),
@@ -1165,8 +1304,8 @@ async fn build_prompt_handoff(
             negative_prompt: compiled.negative_prompt,
             note: compiled.note,
             used_original_prompt: compiled.used_original_prompt,
-            assumptions: compiled.brief.assumptions,
-            focus_tags: compiled.brief.focus_tags,
+            assumptions: assumptions.clone(),
+            focus_tags: focus_tags.clone(),
             extracted_json: compiled.trace.extracted_json,
             raw_output: compiled.trace.raw_output,
             stderr: compiled.trace.stderr,
@@ -1373,6 +1512,7 @@ async fn run_generation_job(
     state: AppState,
     job_id: Uuid,
     model: ModelInfo,
+    selected_lora: Option<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
     request: GenerateRequest,
     reference_asset: Option<InputAsset>,
@@ -1795,6 +1935,8 @@ async fn run_generation_job(
         spoken_text: effective_request.prepared_spoken_text.clone(),
         prompt_assist: request.prompt_assist,
         interpreter_model: interpreter_model_name,
+        lora_name: selected_lora.as_ref().map(|lora| lora.name.clone()),
+        lora_weight: effective_request.normalized_lora_weight(),
         file_name: file_name.clone(),
         relative_path: relative_path.clone(),
         url: format!("/outputs/{relative_path}"),
@@ -2007,6 +2149,7 @@ fn scan_models(
             supported_kinds: support.supported_kinds,
             requires_reference: false,
             supports_image_reference: false,
+            supports_reference_strength: false,
             requires_end_image_reference: false,
             supports_end_image_reference: false,
             supports_video_reference: false,
@@ -2072,6 +2215,7 @@ fn scan_models(
             supported_kinds: support.supported_kinds,
             requires_reference: support.requires_reference,
             supports_image_reference: support.supports_image_reference,
+            supports_reference_strength: support.supports_reference_strength,
             requires_end_image_reference: support.requires_end_image_reference,
             supports_end_image_reference: support.supports_end_image_reference,
             supports_video_reference: support.supports_video_reference,
@@ -2085,6 +2229,157 @@ fn scan_models(
     Ok(models)
 }
 
+fn scan_loras(models_dir: &Path) -> Result<Vec<LoraInfo>> {
+    let loras_dir = models_dir.join("loras");
+    if !loras_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut loras = Vec::new();
+    for entry in WalkDir::new(&loras_dir)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let path = entry.path();
+        if !has_extension(path, "safetensors") && !has_extension(path, "ckpt") {
+            continue;
+        }
+
+        let relative_path = to_slash_path(path.strip_prefix(models_dir)?);
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let family_key = infer_lora_family_key(&relative_path, &file_name)
+            .unwrap_or_else(|| "unknown".to_string());
+        let runtime_supported = family_key != "unknown";
+        let family = lora_family_label(&family_key).to_string();
+        let compatibility_note = if runtime_supported {
+            format!(
+                "{} LoRA ready for Realism + Advanced. Put compatible files in models/loras/{}/ and pair them with matching {} models.",
+                family, family_key, family
+            )
+        } else {
+            "Detected, but Chatty-art could not determine a compatible LoRA family from this file or folder name. Put LoRAs in models/loras/<family>/ using folders like flux, sd, sd3, wan, or qwen."
+                .to_string()
+        };
+
+        loras.push(LoraInfo {
+            id: relative_path.clone(),
+            name: path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&file_name)
+                .to_string(),
+            file_name,
+            relative_path,
+            family,
+            family_key,
+            runtime_supported,
+            compatibility_note,
+        });
+    }
+
+    loras.sort_by(|left, right| {
+        left.family_key
+            .cmp(&right.family_key)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+    Ok(loras)
+}
+
+fn infer_lora_family_key(relative_path: &str, file_name: &str) -> Option<String> {
+    let lower = format!(
+        "{}/{}",
+        relative_path.to_ascii_lowercase(),
+        file_name.to_ascii_lowercase()
+    );
+
+    if lower.contains("flux") || lower.contains("kontext") {
+        return Some("flux".to_string());
+    }
+    if lower.contains("sd3")
+        || lower.contains("sd-3")
+        || lower.contains("sd35")
+        || lower.contains("sd3.5")
+        || lower.contains("stable-diffusion-3")
+    {
+        return Some("sd3".to_string());
+    }
+    if lower.contains("wan") {
+        return Some("wan".to_string());
+    }
+    if lower.contains("qwen") {
+        return Some("qwen".to_string());
+    }
+    if lower.contains("/sd/")
+        || lower.contains("stable-diffusion")
+        || lower.contains("sdxl")
+        || lower.contains("sd15")
+        || lower.contains("sd1.5")
+        || lower.contains("sd21")
+        || lower.contains("sd2.1")
+        || lower.contains("sd2")
+    {
+        return Some("sd".to_string());
+    }
+
+    None
+}
+
+fn lora_family_label(family_key: &str) -> &'static str {
+    match family_key {
+        "flux" => "FLUX",
+        "sd3" => "SD3 / SD3.5",
+        "wan" => "Wan",
+        "qwen" => "Qwen Image",
+        "sd" => "Stable Diffusion",
+        _ => "Unknown",
+    }
+}
+
+fn model_lora_family_key(model: &ModelInfo) -> Option<&'static str> {
+    if model.backend != ModelBackend::StableDiffusionCpp {
+        return None;
+    }
+
+    let family = model.family.to_ascii_lowercase();
+    if family.contains("flux") {
+        return Some("flux");
+    }
+    if family.contains("sd3") {
+        return Some("sd3");
+    }
+    if family.contains("wan") {
+        return Some("wan");
+    }
+    if family.contains("qwen") {
+        return Some("qwen");
+    }
+    if family.contains("stable diffusion")
+        || family.contains("self-contained diffusion")
+        || family.contains("diffusion gguf")
+    {
+        return Some("sd");
+    }
+
+    None
+}
+
+fn model_lora_family_label(model: &ModelInfo) -> &'static str {
+    model_lora_family_key(model)
+        .map(lora_family_label)
+        .unwrap_or("LoRA-compatible")
+}
+
+fn lora_matches_model(lora: &LoraInfo, model: &ModelInfo) -> bool {
+    model_lora_family_key(model)
+        .map(|family_key| family_key == lora.family_key)
+        .unwrap_or(false)
+}
+
 struct DetectedModelSupport {
     family: String,
     backend: ModelBackend,
@@ -2094,6 +2389,7 @@ struct DetectedModelSupport {
     supported_kinds: Vec<MediaKind>,
     requires_reference: bool,
     supports_image_reference: bool,
+    supports_reference_strength: bool,
     requires_end_image_reference: bool,
     supports_end_image_reference: bool,
     supports_video_reference: bool,
@@ -2226,6 +2522,8 @@ fn scan_outputs(outputs_dir: &Path) -> Result<Vec<OutputEntry>> {
             spoken_text: None,
             prompt_assist: PromptAssistMode::Off,
             interpreter_model: None,
+            lora_name: None,
+            lora_weight: None,
             file_name: path
                 .file_name()
                 .and_then(|value| value.to_str())
@@ -2417,6 +2715,7 @@ fn detect_model_support(
             supported_kinds: support.supported_kinds,
             requires_reference: support.requires_reference,
             supports_image_reference: support.supports_image_reference,
+            supports_reference_strength: support.supports_reference_strength,
             requires_end_image_reference: support.requires_end_image_reference,
             supports_end_image_reference: support.supports_end_image_reference,
             supports_video_reference: support.supports_video_reference,
@@ -2435,6 +2734,7 @@ fn detect_model_support(
             supported_kinds: support.supported_kinds,
             requires_reference: false,
             supports_image_reference: false,
+            supports_reference_strength: false,
             requires_end_image_reference: false,
             supports_end_image_reference: false,
             supports_video_reference: false,
@@ -2458,6 +2758,7 @@ fn detect_model_support(
                 supported_kinds: Vec::new(),
                 requires_reference: false,
                 supports_image_reference: false,
+                supports_reference_strength: false,
                 requires_end_image_reference: false,
                 supports_end_image_reference: false,
                 supports_video_reference: false,
@@ -2478,6 +2779,7 @@ fn detect_model_support(
                 supported_kinds: Vec::new(),
                 requires_reference: false,
                 supports_image_reference: false,
+                supports_reference_strength: false,
                 requires_end_image_reference: false,
                 supports_end_image_reference: false,
                 supports_video_reference: false,
@@ -2498,6 +2800,7 @@ fn detect_model_support(
             supported_kinds: vec![MediaKind::Audio],
             requires_reference: false,
             supports_image_reference: false,
+            supports_reference_strength: false,
             requires_end_image_reference: false,
             supports_end_image_reference: false,
             supports_video_reference: false,
@@ -2517,6 +2820,7 @@ fn detect_model_support(
             supported_kinds: vec![MediaKind::Image, MediaKind::Gif, MediaKind::Audio],
             requires_reference: false,
             supports_image_reference: true,
+            supports_reference_strength: false,
             requires_end_image_reference: false,
             supports_end_image_reference: false,
             supports_video_reference: false,
@@ -2535,6 +2839,7 @@ fn detect_model_support(
         supported_kinds: vec![MediaKind::Image, MediaKind::Gif, MediaKind::Audio],
         requires_reference: false,
         supports_image_reference: false,
+        supports_reference_strength: false,
         requires_end_image_reference: false,
         supports_end_image_reference: false,
         supports_video_reference: false,
@@ -2650,6 +2955,10 @@ fn default_settings() -> GenerationSettings {
         temperature: 0.6,
         steps: 28,
         cfg_scale: 7.5,
+        sampler: "euler".to_string(),
+        scheduler: "default".to_string(),
+        reference_strength: 0.8,
+        flow_shift: 3.0,
         resolution: ResolutionPreset::Square512,
         video_resolution: VideoResolutionPreset::Square256,
         video_duration_seconds: 2,
@@ -2711,6 +3020,7 @@ mod tests {
             supported_kinds: vec![MediaKind::Image, MediaKind::Gif, MediaKind::Audio],
             requires_reference: false,
             supports_image_reference: false,
+            supports_reference_strength: false,
             requires_end_image_reference: false,
             supports_end_image_reference: false,
             supports_video_reference: false,
@@ -2739,6 +3049,7 @@ mod tests {
             supported_kinds: vec![MediaKind::Audio],
             requires_reference: false,
             supports_image_reference: false,
+            supports_reference_strength: false,
             requires_end_image_reference: false,
             supports_end_image_reference: false,
             supports_video_reference: false,
@@ -2748,11 +3059,40 @@ mod tests {
         }
     }
 
+    fn fake_realism_image_model(name: &str, family: &str) -> ModelInfo {
+        ModelInfo {
+            id: name.to_string(),
+            name: name.to_string(),
+            slug: name.to_string(),
+            file_name: format!("{name}.gguf"),
+            relative_path: format!("{name}.gguf"),
+            family: family.to_string(),
+            backend: ModelBackend::StableDiffusionCpp,
+            generation_style: GenerationStyle::Realism,
+            runtime_supported: true,
+            compatibility_note: String::new(),
+            supported_kinds: vec![MediaKind::Image, MediaKind::Gif],
+            requires_reference: false,
+            supports_image_reference: true,
+            supports_reference_strength: true,
+            requires_end_image_reference: false,
+            supports_end_image_reference: false,
+            supports_video_reference: false,
+            supports_audio_reference: false,
+            supports_voice_output: false,
+            mmproj_path: None,
+        }
+    }
+
     fn test_settings() -> GenerationSettings {
         GenerationSettings {
             temperature: 0.6,
             steps: 24,
             cfg_scale: 6.0,
+            sampler: "euler".to_string(),
+            scheduler: "default".to_string(),
+            reference_strength: 0.8,
+            flow_shift: 3.0,
             resolution: ResolutionPreset::Square512,
             video_resolution: VideoResolutionPreset::Square256,
             video_duration_seconds: 2,
@@ -2984,6 +3324,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_lora: None,
+            selected_lora_weight: None,
             prepared_prompt: Some(
                 "cinematic city rain ambience, spacious stereo field, soft reflections"
                     .to_string(),
@@ -3005,6 +3347,8 @@ mod tests {
                     same_time_as_previous: true,
                 },
             ],
+            manual_focus_tags: Vec::new(),
+            manual_assumptions: Vec::new(),
         };
 
         let prepared = build_prompt_handoff(
@@ -3046,6 +3390,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_lora: None,
+            selected_lora_weight: None,
             prepared_prompt: None,
             prepared_negative_prompt: None,
             prepared_note: None,
@@ -3053,6 +3399,8 @@ mod tests {
             prepared_spoken_text: None,
             audio_literal_prompt: Some("bird chirps, creek water".to_string()),
             audio_segments: Vec::new(),
+            manual_focus_tags: Vec::new(),
+            manual_assumptions: Vec::new(),
         };
 
         let prepared = build_prompt_handoff(
@@ -3071,5 +3419,67 @@ mod tests {
             prepared.effective_request.combined_audio_literal_prompt().as_deref(),
             Some("bird chirps, creek water")
         );
+    }
+
+    #[tokio::test]
+    async fn manual_realism_handoff_inputs_flow_into_prepared_prompt() {
+        let request = crate::types::GenerateRequest {
+            prompt: "a lighthouse on a cliff".to_string(),
+            negative_prompt: Some("blurry".to_string()),
+            prompt_assist: PromptAssistMode::Off,
+            model: "stable-diffusion-v1-5".to_string(),
+            kind: MediaKind::Image,
+            style: GenerationStyle::Realism,
+            settings: test_settings(),
+            reference_asset: None,
+            reference_intent: ReferenceIntent::Guide,
+            end_reference_asset: None,
+            control_reference_asset: None,
+            selected_lora: None,
+            selected_lora_weight: None,
+            prepared_prompt: None,
+            prepared_negative_prompt: None,
+            prepared_note: None,
+            prepared_interpreter_model: None,
+            prepared_spoken_text: None,
+            audio_literal_prompt: None,
+            audio_segments: Vec::new(),
+            manual_focus_tags: vec![
+                "golden hour".to_string(),
+                "cinematic framing".to_string(),
+            ],
+            manual_assumptions: vec!["stormy coast".to_string()],
+        };
+
+        let prepared = build_prompt_handoff(
+            &dummy_paths(),
+            &request,
+            &fake_realism_image_model("stable-diffusion-v1-5", "Stable Diffusion"),
+            None,
+            None,
+            1234,
+        )
+        .await
+        .unwrap();
+
+        assert!(prepared
+            .effective_request
+            .prompt
+            .contains("golden hour"));
+        assert!(prepared
+            .effective_request
+            .prompt
+            .contains("cinematic framing"));
+        assert_eq!(
+            prepared.focus_tags,
+            vec!["golden hour".to_string(), "cinematic framing".to_string()]
+        );
+        assert_eq!(prepared.assumptions, vec!["stormy coast".to_string()]);
+        assert!(prepared
+            .prompt_assist_note
+            .contains("Manual assumptions: stormy coast"));
+        assert!(prepared
+            .prompt_assist_note
+            .contains("Manual focus cues: golden hour, cinematic framing"));
     }
 }

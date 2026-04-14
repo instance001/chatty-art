@@ -1,5 +1,6 @@
 const state = {
   models: [],
+  loras: [],
   assets: [],
   outputs: [],
   runtimeStatus: null,
@@ -27,6 +28,10 @@ const MODE_DEFAULTS = {
     temperature: "0.6",
     steps: "28",
     cfgScale: "7.5",
+    sampler: "euler",
+    scheduler: "default",
+    referenceStrength: "0.8",
+    flowShift: "3.0",
     resolution: "square512",
     videoResolution: "square512",
     videoDuration: "5",
@@ -38,6 +43,10 @@ const MODE_DEFAULTS = {
     temperature: "0.6",
     steps: "24",
     cfgScale: "6.0",
+    sampler: "euler",
+    scheduler: "default",
+    referenceStrength: "0.8",
+    flowShift: "3.0",
     resolution: "square512",
     videoResolution: "square256",
     videoDuration: "2",
@@ -54,6 +63,10 @@ const elements = {
   audioLiteralPromptBlock: document.getElementById("audioLiteralPromptBlock"),
   audioLiteralPromptTitle: document.getElementById("audioLiteralPromptTitle"),
   audioLiteralPromptInput: document.getElementById("audioLiteralPromptInput"),
+  manualFocusCuesBlock: document.getElementById("manualFocusCuesBlock"),
+  manualFocusCuesInput: document.getElementById("manualFocusCuesInput"),
+  manualAssumptionsBlock: document.getElementById("manualAssumptionsBlock"),
+  manualAssumptionsInput: document.getElementById("manualAssumptionsInput"),
   audioSegmentsBlock: document.getElementById("audioSegmentsBlock"),
   audioSegmentsTitle: document.getElementById("audioSegmentsTitle"),
   audioSegmentsHelp: document.getElementById("audioSegmentsHelp"),
@@ -90,6 +103,27 @@ const elements = {
   stepsValue: document.getElementById("stepsValue"),
   cfgInput: document.getElementById("cfgInput"),
   cfgValue: document.getElementById("cfgValue"),
+  samplerCard: document.getElementById("samplerCard"),
+  samplerInput: document.getElementById("samplerInput"),
+  samplerCopy: document.getElementById("samplerCopy"),
+  schedulerCard: document.getElementById("schedulerCard"),
+  schedulerInput: document.getElementById("schedulerInput"),
+  schedulerCopy: document.getElementById("schedulerCopy"),
+  loraCard: document.getElementById("loraCard"),
+  loraInput: document.getElementById("loraInput"),
+  loraCopy: document.getElementById("loraCopy"),
+  loraWeightCard: document.getElementById("loraWeightCard"),
+  loraWeightInput: document.getElementById("loraWeightInput"),
+  loraWeightValue: document.getElementById("loraWeightValue"),
+  loraWeightCopy: document.getElementById("loraWeightCopy"),
+  referenceStrengthCard: document.getElementById("referenceStrengthCard"),
+  referenceStrengthInput: document.getElementById("referenceStrengthInput"),
+  referenceStrengthValue: document.getElementById("referenceStrengthValue"),
+  referenceStrengthCopy: document.getElementById("referenceStrengthCopy"),
+  flowShiftCard: document.getElementById("flowShiftCard"),
+  flowShiftInput: document.getElementById("flowShiftInput"),
+  flowShiftValue: document.getElementById("flowShiftValue"),
+  flowShiftCopy: document.getElementById("flowShiftCopy"),
   resolutionInput: document.getElementById("resolutionInput"),
   videoResolutionInput: document.getElementById("videoResolutionInput"),
   videoDurationInput: document.getElementById("videoDurationInput"),
@@ -147,11 +181,20 @@ const GPU_TELEMETRY_HEIGHT = 44;
 bindSettingDisplay(elements.temperatureInput, elements.temperatureValue, (value) => Number(value).toFixed(1));
 bindSettingDisplay(elements.stepsInput, elements.stepsValue, (value) => `${value}`);
 bindSettingDisplay(elements.cfgInput, elements.cfgValue, (value) => Number(value).toFixed(1));
+bindSettingDisplay(elements.loraWeightInput, elements.loraWeightValue, (value) => Number(value).toFixed(2));
+bindSettingDisplay(elements.referenceStrengthInput, elements.referenceStrengthValue, (value) => Number(value).toFixed(2));
+bindSettingDisplay(elements.flowShiftInput, elements.flowShiftValue, (value) => Number(value).toFixed(1));
 
 const trackedSettingInputs = [
   elements.temperatureInput,
   elements.stepsInput,
   elements.cfgInput,
+  elements.samplerInput,
+  elements.schedulerInput,
+  elements.loraInput,
+  elements.loraWeightInput,
+  elements.referenceStrengthInput,
+  elements.flowShiftInput,
   elements.resolutionInput,
   elements.videoResolutionInput,
   elements.videoDurationInput,
@@ -227,6 +270,7 @@ function handleTrackedSettingMutation() {
   state.lastAutoDefaultsStyle = null;
   refreshVideoSettingCopy();
   clearPreparedHandoff();
+  renderAdvancedRealismSettings();
   renderModelSummary();
 }
 
@@ -240,6 +284,8 @@ elements.clearPreparedButton.addEventListener("click", () => clearPreparedHandof
 elements.promptInput.addEventListener("input", () => clearPreparedHandoff());
 elements.negativePromptInput.addEventListener("input", () => clearPreparedHandoff());
 elements.audioLiteralPromptInput.addEventListener("input", () => clearPreparedHandoff());
+elements.manualFocusCuesInput.addEventListener("input", () => clearPreparedHandoff());
+elements.manualAssumptionsInput.addEventListener("input", () => clearPreparedHandoff());
 elements.promptAssistInput.addEventListener("change", () => clearPreparedHandoff());
 elements.prepareKindInput.addEventListener("change", () => clearPreparedHandoff());
 elements.addAudioSegmentButton.addEventListener("click", () => {
@@ -321,6 +367,7 @@ async function refreshEverything() {
     loadRuntimeStatus(),
     loadHardwareProfile(),
     loadModels(),
+    loadLoras(),
     loadAssets(),
     loadOutputs(),
     loadGpuTelemetry(),
@@ -385,6 +432,10 @@ function applyModeDefaults(style) {
   elements.temperatureInput.value = preset.temperature;
   elements.stepsInput.value = preset.steps;
   elements.cfgInput.value = preset.cfgScale;
+  elements.samplerInput.value = preset.sampler;
+  elements.schedulerInput.value = preset.scheduler;
+  elements.referenceStrengthInput.value = preset.referenceStrength;
+  elements.flowShiftInput.value = preset.flowShift;
   elements.resolutionInput.value = preset.resolution;
   elements.videoResolutionInput.value = preset.videoResolution;
   elements.videoDurationInput.value = preset.videoDuration;
@@ -395,11 +446,18 @@ function applyModeDefaults(style) {
 }
 
 function refreshSettingDisplays() {
-  [elements.temperatureInput, elements.stepsInput, elements.cfgInput].forEach((input) => {
+  [
+    elements.temperatureInput,
+    elements.stepsInput,
+    elements.cfgInput,
+    elements.referenceStrengthInput,
+    elements.flowShiftInput,
+  ].forEach((input) => {
     input.dispatchEvent(new Event("input"));
   });
   refreshVideoSettingCopy();
   refreshAudioSettingCopy();
+  refreshAdvancedRealismSettingCopy();
 }
 
 function settingsMatchPreset(style) {
@@ -412,6 +470,10 @@ function settingsMatchPreset(style) {
     elements.temperatureInput.value === preset.temperature
     && elements.stepsInput.value === preset.steps
     && elements.cfgInput.value === preset.cfgScale
+    && elements.samplerInput.value === preset.sampler
+    && elements.schedulerInput.value === preset.scheduler
+    && elements.referenceStrengthInput.value === preset.referenceStrength
+    && elements.flowShiftInput.value === preset.flowShift
     && elements.resolutionInput.value === preset.resolution
     && elements.videoResolutionInput.value === preset.videoResolution
     && elements.videoDurationInput.value === preset.videoDuration
@@ -460,6 +522,151 @@ function refreshAudioSettingCopy() {
   }
 
   elements.audioDurationCopy.textContent = `Used for Generate Audio. ${seconds}s is the target clip length for realism soundscape audio. Speech models mostly ignore it.`;
+}
+
+function refreshAdvancedRealismSettingCopy() {
+  const model = getSelectedModel();
+  const samplerLabel = elements.samplerInput.options[elements.samplerInput.selectedIndex]?.text || "Euler";
+  const samplerValue = elements.samplerInput.value;
+  const schedulerValue = elements.schedulerInput.value;
+  const schedulerLabel = elements.schedulerInput.options[elements.schedulerInput.selectedIndex]?.text || "Auto / Runtime Default";
+  const referenceStrength = Number(elements.referenceStrengthInput.value || 0);
+  const flowShift = Number(elements.flowShiftInput.value || 0);
+  const isEditIntent = state.referenceIntent === "edit";
+  const familyLabel = model?.family || "flow-based";
+  const selectedLora = state.loras.find((entry) => entry.id === elements.loraInput.value) || null;
+  const hasStillReference = Boolean(state.primaryReference && state.primaryReference.kind === "image");
+
+  elements.samplerCopy.textContent = describeSamplerSetting(samplerValue, samplerLabel);
+  elements.schedulerCopy.textContent = describeSchedulerSetting(schedulerValue, schedulerLabel);
+  elements.referenceStrengthCopy.textContent = describeReferenceStrengthSetting(
+    referenceStrength,
+    isEditIntent,
+    hasStillReference
+  );
+  elements.flowShiftCopy.textContent = describeFlowShiftSetting(flowShift, familyLabel);
+
+  if (supportsLoraControl(model)) {
+    elements.loraCopy.textContent = describeLoraSelection(model, selectedLora);
+    elements.loraWeightCopy.textContent = describeLoraWeightSetting(
+      Number(elements.loraWeightInput.value || 1),
+      selectedLora
+    );
+  }
+}
+
+function describeSamplerSetting(value, label) {
+  const details = {
+    euler: "Balanced all-rounder. This is the safest first choice and a good baseline for comparisons.",
+    euler_a: "Adds extra randomness and texture. Useful when you want rougher, more chaotic exploration, but it can drift more.",
+    heun: "A smoother, more deliberate denoise path. Often worth trying if Euler feels too rough or unstable.",
+    dpm2: "A cleaner, more structured sampler than the basic baseline. Good when you want a slightly tidier result.",
+    "dpm++2s_a": "Pushes detail harder with a bit more adventurous behaviour. Good for experimentation once the base setup is working.",
+    "dpm++2m": "A popular modern sampler for cleaner detail and consistency. Often a good second test after Euler.",
+    "dpm++2mv2": "A refined DPM++ variant. Try it when you want cleaner detail without going fully experimental.",
+    ipndm: "A lighter, faster-feeling sampler. Handy for quick tests, but it may feel less exact than the safer defaults.",
+    ipndm_v: "A variant of IPNDM. Worth testing only if you are already comparing sampler behaviour on purpose.",
+    lcm: "Built for fast workflows and lower step counts. Best when the model or LoRA expects LCM-style behaviour.",
+    ddim_trailing: "A more traditional denoise feel. Can produce softer, gentler results than the sharper samplers.",
+    tcd: "Speed-oriented experimental sampler. Best treated as a deliberate test option rather than a default.",
+    res_multistep: "An advanced sampler for deliberate experimentation. Not the best first choice for a new setup.",
+    res_2s: "A more experimental sampler variant. Useful for testing, but not usually the best beginner baseline.",
+  };
+
+  return `${label} is active. ${details[value] || "This sampler changes how the model walks from noise to the final image. If you are unsure, go back to Euler."}`;
+}
+
+function describeSchedulerSetting(value, label) {
+  const details = {
+    default: "Auto lets the runtime keep its preferred schedule for the selected model family. This is the safest place to start.",
+    discrete: "A straightforward traditional schedule. Good as a simple comparison point if Auto is not giving you what you want.",
+    karras: "Puts more emphasis on the later denoise stages. Often used when people want cleaner, crisper results.",
+    exponential: "Uses a steeper curve across the run. It can feel punchier, but it is more of an experiment than a default.",
+    ays: "A schedule aimed at doing more with fewer useful steps. Best for intentional speed-vs-quality testing.",
+    gits: "An experimental schedule. Good for side-by-side tests, not usually the first thing to change.",
+    sgm_uniform: "Spreads work more evenly across the run. Can be a useful neutral comparison schedule on some families.",
+    simple: "A very plain schedule. Best used for debugging or controlled comparisons rather than as a quality preset.",
+    smoothstep: "A gentler transition schedule. Useful if other schedules feel too harsh or abrupt.",
+    kl_optimal: "An advanced schedule that tries to place denoise effort more efficiently. Worth testing only after the basics feel stable.",
+    lcm: "Pairs with LCM-style fast workflows. Most useful when the selected model or LoRA is built for that path.",
+    bong_tangent: "A highly experimental schedule. Treat it as a curiosity test rather than a safe everyday option.",
+  };
+
+  return `${label} is active. ${details[value] || "This scheduler changes how denoise effort is distributed across the run. Auto is still the safest baseline."}`;
+}
+
+function describeReferenceStrengthSetting(value, isEditIntent, hasStillReference) {
+  if (!hasStillReference) {
+    return "No still-image guide or edit source is assigned right now. This only matters when you use a reference image.";
+  }
+
+  const band = value <= 0.35
+    ? "very gentle"
+    : value <= 0.7
+      ? "balanced"
+      : "strong";
+
+  if (isEditIntent) {
+    if (band === "very gentle") {
+      return `Edit mode is active at ${value.toFixed(2)}. This is a very gentle edit setting, so the result should usually stay closer to the source image.`;
+    }
+    if (band === "balanced") {
+      return `Edit mode is active at ${value.toFixed(2)}. This is a balanced edit setting, keeping recognisable structure while still allowing a noticeable rewrite.`;
+    }
+    return `Edit mode is active at ${value.toFixed(2)}. This is a strong edit setting, so the model is allowed to rewrite the source image more aggressively.`;
+  }
+
+  if (band === "very gentle") {
+    return `Guide mode is active at ${value.toFixed(2)}. This keeps the reference as a soft hint while still giving the model plenty of freedom.`;
+  }
+  if (band === "balanced") {
+    return `Guide mode is active at ${value.toFixed(2)}. This is a balanced steer, giving the reference a visible say without completely taking over the result.`;
+  }
+  return `Guide mode is active at ${value.toFixed(2)}. This is a strong steer, so the model should lean much more heavily on the reference image.`;
+}
+
+function describeFlowShiftSetting(value, familyLabel) {
+  if (value <= 1.5) {
+    return `${familyLabel} is using a low flow shift of ${value.toFixed(1)}. That is a conservative setting and usually the safest place to stay if you are troubleshooting.`;
+  }
+  if (value <= 4.0) {
+    return `${familyLabel} is using a flow shift of ${value.toFixed(1)}. This sits close to the normal working range for flow-based families.`;
+  }
+  return `${familyLabel} is using a high flow shift of ${value.toFixed(1)}. This is an experimental setting and can noticeably change motion or detail behaviour.`;
+}
+
+function describeLoraSelection(model, selectedLora) {
+  const familyLabel = model?.family || "selected model";
+  const familyKey = modelLoraFamilyKey(model) || "family";
+  const compatibleLoras = getCompatibleLoras(model);
+
+  if (!selectedLora) {
+    return compatibleLoras.length
+      ? `${compatibleLoras.length} compatible LoRA${compatibleLoras.length === 1 ? "" : "s"} found for ${familyLabel}. Choose one if you want to bolt a more specific style or concept on top of the base model.`
+      : `No compatible LoRAs detected for ${familyLabel}. Put matching files in models/loras/${familyKey}/.`;
+  }
+
+  return `${selectedLora.name} is active. Think of it as a small style or concept add-on sitting on top of the ${familyLabel} base model.`;
+}
+
+function describeLoraWeightSetting(weight, selectedLora) {
+  if (!selectedLora) {
+    return "Choose a LoRA first. Lower weights keep it subtle, higher weights push the style harder.";
+  }
+
+  if (weight <= 0.35) {
+    return `${weight.toFixed(2)} is a very light touch. The LoRA should act more like a hint than a takeover.`;
+  }
+  if (weight <= 0.75) {
+    return `${weight.toFixed(2)} is a gentle LoRA setting. Good when you want the base model to stay in charge.`;
+  }
+  if (weight <= 1.15) {
+    return `${weight.toFixed(2)} is a balanced LoRA setting. This is the best neutral starting point for most tests.`;
+  }
+  if (weight <= 1.5) {
+    return `${weight.toFixed(2)} is a strong LoRA setting. Useful when the LoRA effect feels too weak, but it can start to overpower the base model.`;
+  }
+  return `${weight.toFixed(2)} is a heavy LoRA setting. Treat this as experimental, because it can distort the base model if the match is poor.`;
 }
 
 function createAudioSegment(seed = {}) {
@@ -620,6 +827,18 @@ async function loadModels() {
   renderModels();
 }
 
+async function loadLoras() {
+  try {
+    state.loras = await fetchJson("/api/loras");
+  } catch {
+    state.loras = [];
+  }
+
+  renderAdvancedRealismSettings();
+  renderModelSummary();
+  renderPreparedHandoff();
+}
+
 async function loadAssets() {
   try {
     state.assets = await fetchJson("/api/assets");
@@ -664,6 +883,7 @@ function renderStyleMode() {
 
   elements.negativePromptBlock.classList.toggle("hidden", !realism);
   renderAudioPromptInputs();
+  renderManualPromptAssistInputs();
   elements.temperatureCard.classList.toggle("muted-setting", realism);
   elements.temperatureInput.disabled = realism;
   elements.lowVramCard.classList.toggle("muted-setting", !realism);
@@ -674,6 +894,7 @@ function renderStyleMode() {
   elements.lowVramCopy.textContent = realism
     ? "Helpful for realism jobs on GPUs that hit VRAM limits, especially higher resolutions and video. It is slower, but safer."
     : "Expressive mode does not use this. Realism mode can spill more work to CPU and tile VAE decode when this is enabled.";
+  renderAdvancedRealismSettings();
   renderReferenceIntentControls();
 }
 
@@ -690,6 +911,130 @@ function renderPromptWorkflowMode() {
 
   elements.previewHandoffPanel.classList.remove("hidden");
   renderAudioPromptInputs();
+  renderManualPromptAssistInputs();
+  renderAdvancedRealismSettings();
+}
+
+function supportsManualPromptAssistInputs(model = getSelectedModel()) {
+  return Boolean(
+    state.generationStyle === "realism"
+    && state.workflowMode === "advanced"
+    && model
+    && model.backend === "stable_diffusion_cpp"
+    && kindSupported(model, "image")
+  );
+}
+
+function renderManualPromptAssistInputs() {
+  const show = supportsManualPromptAssistInputs();
+  elements.manualFocusCuesBlock.classList.toggle("hidden", !show);
+  elements.manualAssumptionsBlock.classList.toggle("hidden", !show);
+}
+
+function supportsAdvancedRealismSettings(model = getSelectedModel()) {
+  return Boolean(
+    state.generationStyle === "realism"
+    && state.workflowMode === "advanced"
+    && model
+    && model.backend === "stable_diffusion_cpp"
+  );
+}
+
+function supportsReferenceStrengthControl(model = getSelectedModel()) {
+  return Boolean(
+    supportsAdvancedRealismSettings(model)
+    && model.supports_reference_strength
+  );
+}
+
+function supportsFlowShiftControl(model = getSelectedModel()) {
+  if (!supportsAdvancedRealismSettings(model)) {
+    return false;
+  }
+
+  const family = String(model.family || "").toLowerCase();
+  return family.includes("wan") || family.includes("qwen");
+}
+
+function modelLoraFamilyKey(model = getSelectedModel()) {
+  if (!model || model.backend !== "stable_diffusion_cpp") {
+    return null;
+  }
+
+  const family = String(model.family || "").toLowerCase();
+  if (family.includes("flux")) return "flux";
+  if (family.includes("sd3")) return "sd3";
+  if (family.includes("wan")) return "wan";
+  if (family.includes("qwen")) return "qwen";
+  if (
+    family.includes("stable diffusion")
+    || family.includes("self-contained diffusion")
+    || family.includes("diffusion gguf")
+  ) {
+    return "sd";
+  }
+
+  return null;
+}
+
+function getCompatibleLoras(model = getSelectedModel()) {
+  const familyKey = modelLoraFamilyKey(model);
+  if (!familyKey) {
+    return [];
+  }
+
+  return state.loras.filter((lora) => lora.runtime_supported && lora.family_key === familyKey);
+}
+
+function supportsLoraControl(model = getSelectedModel()) {
+  return Boolean(
+    supportsAdvancedRealismSettings(model)
+    && getCompatibleLoras(model).length
+  );
+}
+
+function renderAdvancedRealismSettings() {
+  const model = getSelectedModel();
+  const showAdvancedRealism = supportsAdvancedRealismSettings(model);
+  const showLora = supportsLoraControl(model);
+  const showReferenceStrength = supportsReferenceStrengthControl(model);
+  const showFlowShift = supportsFlowShiftControl(model);
+
+  elements.samplerCard.classList.toggle("hidden", !showAdvancedRealism);
+  elements.schedulerCard.classList.toggle("hidden", !showAdvancedRealism);
+  elements.loraCard.classList.toggle("hidden", !showLora);
+  elements.loraWeightCard.classList.toggle("hidden", !showLora);
+  elements.referenceStrengthCard.classList.toggle("hidden", !showReferenceStrength);
+  elements.flowShiftCard.classList.toggle("hidden", !showFlowShift);
+
+  if (showLora) {
+    const compatibleLoras = getCompatibleLoras(model);
+    const currentSelection = elements.loraInput.value;
+    const options = [
+      `<option value="">No LoRA</option>`,
+      ...compatibleLoras.map((lora) => `<option value="${escapeHtml(lora.id)}">${escapeHtml(lora.name)} | ${escapeHtml(lora.family)}</option>`),
+    ];
+    elements.loraInput.innerHTML = options.join("");
+    if (compatibleLoras.some((lora) => lora.id === currentSelection)) {
+      elements.loraInput.value = currentSelection;
+    } else {
+      elements.loraInput.value = "";
+    }
+
+    const familyLabel = model.family || "selected";
+    elements.loraCopy.textContent = compatibleLoras.length
+      ? `${compatibleLoras.length} compatible LoRA${compatibleLoras.length === 1 ? "" : "s"} found for ${familyLabel}. Put more in models/loras/${compatibleLoras[0].family_key}/.`
+      : `No compatible LoRAs detected for ${familyLabel}. Put them in models/loras/${modelLoraFamilyKey(model) || "family"}/.`;
+    const weight = Number(elements.loraWeightInput.value || 1);
+    elements.loraWeightCopy.textContent = elements.loraInput.value
+      ? `${weight.toFixed(2)} will be used as the LoRA strength for this run. 1.00 is the safest neutral starting point.`
+      : "Choose a LoRA first. Lower weights keep it subtle, higher weights push the style harder.";
+  } else {
+    elements.loraInput.innerHTML = `<option value="">No LoRA</option>`;
+    elements.loraInput.value = "";
+  }
+
+  refreshAdvancedRealismSettingCopy();
 }
 
 function renderRuntimeBadges() {
@@ -937,6 +1282,17 @@ function renderModelSummary(hiddenModeCount = null) {
   }
   if (model.supports_audio_reference) {
     badges.push(createModelBadge("Audio refs optional", "reference"));
+  }
+  if (supportsLoraControl(model) && elements.loraInput.value) {
+    const selectedLora = state.loras.find((entry) => entry.id === elements.loraInput.value);
+    if (selectedLora) {
+      badges.push(
+        createModelBadge(
+          `LoRA: ${selectedLora.name} @ ${Number(elements.loraWeightInput.value || 1).toFixed(2)}`,
+          "reference"
+        )
+      );
+    }
   }
 
   const hiddenNote = invisibleCount > 0
@@ -1622,6 +1978,7 @@ function renderReferenceIntentControls() {
   elements.referenceEnd.disabled = !context.endEnabled;
   elements.referenceControl.disabled = !context.controlEnabled;
   elements.referenceModeNote.textContent = context.message;
+  refreshAdvancedRealismSettingCopy();
   renderAssignedReferences();
 }
 
@@ -2130,6 +2487,11 @@ function renderPreparedHandoff() {
     createPreparedChip(handoff.resolution_label || "Current settings"),
     createPreparedChip(`Estimate ${formatDurationRange(handoff.estimated_time)}`),
     handoff.interpreter_model ? createPreparedChip(`Interpreter ${handoff.interpreter_model}`) : "",
+    handoff.selected_lora_name
+      ? createPreparedChip(
+          `LoRA ${handoff.selected_lora_name} @ ${Number(handoff.selected_lora_weight || 1).toFixed(2)}`
+        )
+      : "",
     handoff.used_original_prompt ? createPreparedChip("Using original wording") : "",
     isSpeechAudio ? createPreparedChip("Speech handoff") : "",
     isSoundAudio ? createPreparedChip("Literal sound lane kept separate") : "",
@@ -2205,12 +2567,16 @@ function buildBasePayload(kind) {
   const audioSegments = includeAudioLiteral && state.workflowMode === "advanced"
     ? getNormalizedAudioSegments()
     : [];
+  const includeManualPromptControls = supportsManualPromptAssistInputs(model);
+  const includeLora = supportsLoraControl(model) && elements.loraInput.value;
   return {
     prompt,
     negative_prompt: negativePrompt ? negativePrompt : null,
     audio_literal_prompt:
       includeAudioLiteral && !audioSegments.length && audioLiteralPrompt ? audioLiteralPrompt : null,
     audio_segments: audioSegments,
+    manual_focus_tags: includeManualPromptControls ? parsePromptListInput(elements.manualFocusCuesInput.value) : [],
+    manual_assumptions: includeManualPromptControls ? parsePromptListInput(elements.manualAssumptionsInput.value) : [],
     prompt_assist: elements.promptAssistInput.value,
     model: model.id,
     kind,
@@ -2219,6 +2585,10 @@ function buildBasePayload(kind) {
       temperature: Number(elements.temperatureInput.value),
       steps: Number(elements.stepsInput.value),
       cfg_scale: Number(elements.cfgInput.value),
+      sampler: elements.samplerInput.value,
+      scheduler: elements.schedulerInput.value,
+      reference_strength: Number(elements.referenceStrengthInput.value),
+      flow_shift: Number(elements.flowShiftInput.value),
       resolution: elements.resolutionInput.value,
       video_resolution: elements.videoResolutionInput.value,
       video_duration_seconds: Number(elements.videoDurationInput.value),
@@ -2231,12 +2601,21 @@ function buildBasePayload(kind) {
     reference_intent: state.referenceIntent,
     end_reference_asset: state.endReference ? state.endReference.id : null,
     control_reference_asset: state.controlReference ? state.controlReference.id : null,
+    selected_lora: includeLora ? elements.loraInput.value : null,
+    selected_lora_weight: includeLora ? Number(elements.loraWeightInput.value) : null,
     prepared_prompt: null,
     prepared_negative_prompt: null,
     prepared_note: null,
     prepared_interpreter_model: null,
     prepared_spoken_text: null,
   };
+}
+
+function parsePromptListInput(value) {
+  return String(value || "")
+    .split(/[\n,|]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
 }
 
 async function prepareGenerationRequest() {

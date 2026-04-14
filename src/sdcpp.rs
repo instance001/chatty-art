@@ -35,6 +35,7 @@ pub struct SdcppSupport {
     pub supported_kinds: Vec<MediaKind>,
     pub requires_reference: bool,
     pub supports_image_reference: bool,
+    pub supports_reference_strength: bool,
     pub requires_end_image_reference: bool,
     pub supports_end_image_reference: bool,
     pub supports_video_reference: bool,
@@ -111,6 +112,7 @@ pub fn detect_sdcpp_support(
 ) -> Option<SdcppSupport> {
     let model_path = models_dir.join(native_relative_path(model_relative_path));
     let recipe = detect_runtime_recipe(diffuse_runtime_dir, models_dir, &model_path, file_name)?;
+    let supports_reference_strength = recipe.uses_reference_strength();
 
     Some(SdcppSupport {
         family: recipe.family_label().to_string(),
@@ -119,6 +121,7 @@ pub fn detect_sdcpp_support(
         supported_kinds: recipe.supported_kinds,
         requires_reference: recipe.requires_reference,
         supports_image_reference: recipe.supports_image_reference,
+        supports_reference_strength,
         requires_end_image_reference: recipe.requires_end_image_reference,
         supports_end_image_reference: recipe.supports_end_image_reference,
         supports_video_reference: recipe.supports_video_reference,
@@ -216,6 +219,7 @@ pub async fn generate_with_sdcpp(
 
     let cli_path = ensure_sd_cli(diffuse_runtime_dir).await?;
     let mut args = build_base_sdcpp_args(&recipe, request, seed)?;
+    append_lora_runtime_args(&mut args, request, models_dir)?;
     let mut temp_dirs = Vec::new();
 
     if let Some(reference_asset) = reference_asset {
@@ -229,7 +233,10 @@ pub async fn generate_with_sdcpp(
                 args.push("--init-img".to_string());
                 args.push(reference_path.display().to_string());
                 args.push("--strength".to_string());
-                args.push(init_image_strength(request.reference_intent).to_string());
+                args.push(format_float_arg(normalize_reference_strength(
+                    request.settings.reference_strength,
+                    request.reference_intent,
+                )));
             }
             Some(ReferenceMode::RefImage) => {
                 args.push("-r".to_string());
@@ -360,6 +367,9 @@ fn build_base_sdcpp_args(
         .negative_prompt
         .as_deref()
         .unwrap_or("low quality, blurry, distorted");
+    let sampler = normalize_sampling_method(&request.settings.sampler);
+    let scheduler = normalize_scheduler(&request.settings.scheduler);
+    let flow_shift = normalize_flow_shift(request.settings.flow_shift);
 
     let mut args = vec![
         primary_model_flag(&recipe.family).to_string(),
@@ -379,8 +389,13 @@ fn build_base_sdcpp_args(
         "-H".to_string(),
         height.to_string(),
         "--sampling-method".to_string(),
-        "euler".to_string(),
+        sampler.to_string(),
     ];
+
+    if let Some(scheduler) = scheduler {
+        args.push("--scheduler".to_string());
+        args.push(scheduler.to_string());
+    }
 
     if let Some(path) = &recipe.vae_path {
         args.push("--vae".to_string());
@@ -416,7 +431,7 @@ fn build_base_sdcpp_args(
         args.push("--high-noise-cfg-scale".to_string());
         args.push(request.settings.cfg_scale.to_string());
         args.push("--high-noise-sampling-method".to_string());
-        args.push("euler".to_string());
+        args.push(sampler.to_string());
         args.push("--high-noise-steps".to_string());
         args.push(request.settings.steps.max(4).to_string());
     }
@@ -431,11 +446,11 @@ fn build_base_sdcpp_args(
         | RuntimeFamily::Anima => {}
         RuntimeFamily::QwenImage => {
             args.push("--flow-shift".to_string());
-            args.push("3".to_string());
+            args.push(format_float_arg(flow_shift));
         }
         RuntimeFamily::QwenImageEdit => {
             args.push("--flow-shift".to_string());
-            args.push("3".to_string());
+            args.push(format_float_arg(flow_shift));
         }
         RuntimeFamily::Wan => {
             args.push("-M".to_string());
@@ -451,7 +466,7 @@ fn build_base_sdcpp_args(
             args.push("--fps".to_string());
             args.push(request.settings.video_fps.to_string());
             args.push("--flow-shift".to_string());
-            args.push("3.0".to_string());
+            args.push(format_float_arg(flow_shift));
             args.push("--clip-on-cpu".to_string());
         }
         RuntimeFamily::Ltx => {
@@ -468,6 +483,116 @@ fn build_base_sdcpp_args(
     apply_low_vram_tuning(recipe, request, width, height, &mut args);
 
     Ok(args)
+}
+
+fn append_lora_runtime_args(
+    args: &mut Vec<String>,
+    request: &GenerateRequest,
+    models_dir: &Path,
+) -> Result<()> {
+    let Some(selected_lora) = request.selected_lora.as_deref() else {
+        return Ok(());
+    };
+
+    let lora_path = models_dir.join(native_relative_path(selected_lora));
+    if !lora_path.exists() {
+        bail!(
+            "The selected LoRA '{}' is missing from models/loras/.",
+            selected_lora
+        );
+    }
+
+    let lora_stem = lora_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("The selected LoRA file name is not valid for the local runtime."))?;
+    let lora_parent = lora_path
+        .parent()
+        .ok_or_else(|| anyhow!("The selected LoRA path does not have a parent directory."))?;
+    let weight = request.normalized_lora_weight().unwrap_or(1.0);
+    let prompt_tag = format!(" <lora:{lora_stem}:{}>", format_float_arg(weight));
+
+    if let Some(prompt_index) = args.iter().position(|value| value == "-p") {
+        if let Some(prompt) = args.get_mut(prompt_index + 1) {
+            prompt.push_str(&prompt_tag);
+        }
+    }
+
+    args.push("--lora-model-dir".to_string());
+    args.push(lora_parent.display().to_string());
+
+    Ok(())
+}
+
+fn normalize_sampling_method(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "euler" => "euler",
+        "euler_a" => "euler_a",
+        "heun" => "heun",
+        "dpm2" => "dpm2",
+        "dpm++2s_a" => "dpm++2s_a",
+        "dpm++2m" => "dpm++2m",
+        "dpm++2mv2" => "dpm++2mv2",
+        "ipndm" => "ipndm",
+        "ipndm_v" => "ipndm_v",
+        "lcm" => "lcm",
+        "ddim_trailing" => "ddim_trailing",
+        "tcd" => "tcd",
+        "res_multistep" => "res_multistep",
+        "res_2s" => "res_2s",
+        _ => "euler",
+    }
+}
+
+fn normalize_scheduler(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "default" | "auto" => None,
+        "discrete" => Some("discrete"),
+        "karras" => Some("karras"),
+        "exponential" => Some("exponential"),
+        "ays" => Some("ays"),
+        "gits" => Some("gits"),
+        "sgm_uniform" => Some("sgm_uniform"),
+        "simple" => Some("simple"),
+        "smoothstep" => Some("smoothstep"),
+        "kl_optimal" => Some("kl_optimal"),
+        "lcm" => Some("lcm"),
+        "bong_tangent" => Some("bong_tangent"),
+        _ => None,
+    }
+}
+
+fn normalize_reference_strength(value: f32, intent: ReferenceIntent) -> f32 {
+    let fallback = match intent {
+        ReferenceIntent::Guide => 0.8,
+        ReferenceIntent::Edit => 0.45,
+    };
+
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
+}
+
+fn normalize_flow_shift(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 10.0)
+    } else {
+        3.0
+    }
+}
+
+fn format_float_arg(value: f32) -> String {
+    let mut formatted = format!("{value:.2}");
+    while formatted.contains('.') && formatted.ends_with('0') {
+        formatted.pop();
+    }
+    if formatted.ends_with('.') {
+        formatted.push('0');
+    }
+    formatted
 }
 
 fn apply_low_vram_tuning(
@@ -611,13 +736,6 @@ fn normalize_sdcpp_video_output(output_path: &Path) -> Result<()> {
         "stable-diffusion.cpp finished without creating {}.",
         output_path.display()
     );
-}
-
-fn init_image_strength(intent: ReferenceIntent) -> &'static str {
-    match intent {
-        ReferenceIntent::Guide => "0.8",
-        ReferenceIntent::Edit => "0.45",
-    }
 }
 
 async fn prepare_control_video_frames(
@@ -1442,6 +1560,10 @@ fn detect_runtime_recipe(
 impl RuntimeRecipe {
     fn runtime_supported(&self) -> bool {
         self.runtime_tree_ready && self.missing.is_empty()
+    }
+
+    fn uses_reference_strength(&self) -> bool {
+        matches!(self.reference_mode, Some(ReferenceMode::InitImage))
     }
 
     fn family_label(&self) -> &'static str {
@@ -2397,6 +2519,10 @@ mod tests {
                 temperature: 0.8,
                 steps: 24,
                 cfg_scale: 6.5,
+                sampler: "euler".to_string(),
+                scheduler: "default".to_string(),
+                reference_strength: 0.8,
+                flow_shift: 3.0,
                 resolution: ResolutionPreset::Square512,
                 video_resolution: VideoResolutionPreset::Square256,
                 video_duration_seconds: 2,
@@ -2409,6 +2535,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_lora: None,
+            selected_lora_weight: None,
             prepared_prompt: None,
             prepared_negative_prompt: None,
             prepared_note: None,
@@ -2416,6 +2544,8 @@ mod tests {
             prepared_spoken_text: None,
             audio_literal_prompt: None,
             audio_segments: Vec::new(),
+            manual_focus_tags: Vec::new(),
+            manual_assumptions: Vec::new(),
         }
     }
 

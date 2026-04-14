@@ -1432,6 +1432,15 @@ fn polish_compiled_prompt(
     joined
 }
 
+pub fn polish_manual_prompt_handoff(
+    raw_prompt: &str,
+    focus_tags: &[String],
+    style: GenerationStyle,
+    kind: MediaKind,
+) -> String {
+    polish_compiled_prompt(raw_prompt, focus_tags, style, kind)
+}
+
 fn push_prompt_part(parts: &mut Vec<String>, seen: &mut HashSet<String>, value: String) {
     let key = value.to_ascii_lowercase();
     if seen.insert(key) {
@@ -3466,6 +3475,10 @@ fn default_settings() -> GenerationSettings {
         temperature: 0.6,
         steps: 28,
         cfg_scale: 7.5,
+        sampler: "euler".to_string(),
+        scheduler: "default".to_string(),
+        reference_strength: 0.8,
+        flow_shift: 3.0,
         resolution: crate::types::ResolutionPreset::Square512,
         video_resolution: VideoResolutionPreset::Square256,
         video_duration_seconds: 2,
@@ -3481,6 +3494,10 @@ fn compiler_settings() -> GenerationSettings {
         temperature: 0.2,
         steps: 20,
         cfg_scale: 12.0,
+        sampler: "euler".to_string(),
+        scheduler: "default".to_string(),
+        reference_strength: 0.8,
+        flow_shift: 3.0,
         resolution: crate::types::ResolutionPreset::Square512,
         video_resolution: VideoResolutionPreset::Square512,
         video_duration_seconds: 2,

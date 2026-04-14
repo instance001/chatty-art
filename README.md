@@ -18,6 +18,8 @@ Chatty-art is a simple local image/GIF/video/audio generator with:
 - Model-aware `Recommended Limits On This Hardware` guidance in the UI
 - Collapsible `Controls`, `Outputs`, and `Input Tray` columns for easier layout management
 - Optional `Prompt Assist` compiler that expands short prompts into richer local briefs before generation
+- Advanced realism controls for `Sampler`, `Scheduler`, `Reference Strength`, `Flow Shift`, and family-aware `LoRA`
+- Manual `Focus Cues` and `Defaults / Assumptions` fields in `Realism + Advanced` for steering the handoff when Prompt Assist needs help
 - Dedicated audio `Words / Script` or `Words / Sounds` box for realism audio models
 - Dedicated `Voice Reference` tray assignment for realism speech models like `OuteTTS`
 - `Basic / Advanced` prompt mode split, so the beginner path stays simple while advanced users get deeper controls
@@ -297,6 +299,152 @@ Example advanced sound setup:
   - `Words / Sounds`
     `steady rain, soft roof patter`
 
+## Advanced Realism Controls
+
+When you switch to `Realism + Advanced`, Chatty-art can show extra realism controls for models that support them.
+
+The goal is to keep `Basic` mode clean while still giving power users room to experiment.
+
+The current advanced realism controls are:
+
+- `Sampler`
+  Chooses the main sampling method for the realism backend.
+  If you do not know what to pick, leave it on `Euler`.
+
+- `Scheduler`
+  Chooses how noise is distributed across the generation run.
+  If you are not intentionally testing combinations, leave it on `Auto / Runtime Default`.
+
+- `Reference Strength`
+  Only appears for realism models and workflows that actually use still-image reference strength.
+  Higher values hold closer to the reference image.
+  Lower values give the model more freedom to drift.
+
+- `Flow Shift`
+  Only appears for model families that use it, such as `Wan` and `Qwen`.
+  This is an advanced flow-model tuning control.
+  If you are not deliberately experimenting, leave it at the default value.
+
+- `Manual Focus Cues`
+  Lets you type your own short visual cues directly into the handoff.
+  Good examples are things like `golden hour`, `shallow depth of field`, `wet pavement`, or `cinematic framing`.
+  These are useful when Prompt Assist misses an important visual priority or when you want to add your own extra steering without rewriting the whole prompt.
+
+- `Manual Defaults / Assumptions`
+  Lets you type the sensible defaults you want the handoff to assume.
+  Good examples are things like `adult woman`, `stormy coast`, `modern city street`, or `overcast afternoon`.
+  These are useful when the base prompt is short and you want to lock in a few concrete assumptions yourself instead of relying on the automatic expansion stage.
+
+- `LoRA`
+  Only appears for realism model families that have compatible LoRA files available.
+  Chatty-art currently supports one LoRA at a time in `Realism + Advanced`.
+  Put LoRA files in `models/loras/<family>/`, for example:
+  - `models/loras/flux/`
+  - `models/loras/sd/`
+  - `models/loras/sd3/`
+  - `models/loras/wan/`
+  Supported LoRA file types are `.safetensors` and `.ckpt`.
+  Chatty-art will only show LoRAs that match the selected model family.
+
+- `LoRA Weight`
+  Controls how strongly the selected LoRA influences the result.
+  Lower values are gentler.
+  Higher values push harder toward the LoRA style or subject behavior.
+  If you are just starting, `1.0` is a sensible default.
+
+Simple beginner advice:
+
+- `Basic` mode is still the best place to start.
+- Use `Realism + Advanced` only when you want to tune behavior on purpose.
+- Start with:
+  - `Sampler = Euler`
+  - `Scheduler = Auto / Runtime Default`
+  - `Reference Strength = default`
+  - `Flow Shift = default`
+- `LoRA = off` until the base model is behaving the way you want
+- Change one thing at a time so you can tell what actually helped.
+
+## LoRA Basics
+
+`LoRA` stands for `Low-Rank Adaptation`.
+
+Plain-language meaning:
+
+- a LoRA is a small add-on file that changes how a base model behaves
+- it usually pushes the model toward a style, character, look, camera feel, or subject behavior
+- it is not a full model replacement
+- you still need the main base model first
+
+Good beginner mental model:
+
+- base model = the main engine
+- LoRA = a bolt-on tuning pack
+
+In Chatty-art today:
+
+- LoRA is available in `Realism + Advanced`
+- Chatty-art currently supports one LoRA at a time
+- Chatty-art only shows LoRAs that match the selected model family
+
+### Where LoRAs Go
+
+Put LoRA files inside `models/loras/<family>/`
+
+Examples:
+
+- `models/loras/flux/`
+- `models/loras/sd/`
+- `models/loras/sd3/`
+- `models/loras/wan/`
+
+Supported file types:
+
+- `.safetensors`
+- `.ckpt`
+
+### Matching The Right LoRA
+
+This part matters a lot:
+
+- `FLUX` LoRAs should be used with `FLUX` models
+- `SD1.5` / `SD2.1` style LoRAs belong in the general `sd` bucket
+- `SD3` / `SD3.5` LoRAs belong in `sd3`
+- `Wan` LoRAs belong in `wan`
+
+If the family does not match, the LoRA usually will not show up or will not behave properly.
+
+### Tips For Finding LoRAs
+
+The easiest search pattern is:
+
+- base model family name
+- plus the word `LoRA`
+- plus the file type or ecosystem you want
+
+Examples:
+
+- `FLUX LoRA safetensors`
+- `Stable Diffusion 1.5 LoRA safetensors`
+- `SD3 LoRA safetensors`
+- `Wan LoRA safetensors`
+
+Good beginner rule:
+
+- if a LoRA page does not clearly say what base family it was trained for, skip it
+- if the examples are all for a different model family than yours, skip it
+- if you are unsure, test with the LoRA off first, then on at `1.0`
+
+### First LoRA Advice
+
+If you are new:
+
+- get the base model working first
+- turn LoRA on only after the base model is already producing sensible results
+- start around `LoRA Weight = 1.0`
+- if the result becomes too distorted or overpowering, lower the weight
+- if the LoRA effect is too weak, raise it slowly
+- only change one advanced control at a time
+
 ## Run
 
 1. Drop one or more `.gguf` models into `models/`
@@ -340,6 +488,9 @@ The app opens at `http://127.0.0.1:7878`.
   - `OuteTTS` handles multi-segment speech
   - `Stable Audio Open` handles multi-segment sound layers
   - Chatty-art does not yet merge speech and sound backends into one combined audio job
+- `Preview Handoff` can now be used in both `Basic` and `Advanced` modes.
+- `Realism + Advanced` can surface extra controls like `Sampler`, `Scheduler`, `Reference Strength`, and `Flow Shift` depending on the selected model family.
+- `Realism + Advanced` can also surface `Manual Focus Cues` and `Manual Defaults / Assumptions` so you can add your own handoff steering directly.
 - `Prompt Assist` can be set to `Off`, `Gentle`, or `Strong`.
 - Prompt Assist uses a local expressive `llama.cpp` model as an interpreter role before generation.
 - For realism speech models, Prompt Assist now separates spoken words from delivery direction.

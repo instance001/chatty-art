@@ -190,11 +190,35 @@ fn default_low_vram_mode() -> bool {
     false
 }
 
+fn default_sampler() -> String {
+    "euler".to_string()
+}
+
+fn default_scheduler() -> String {
+    "default".to_string()
+}
+
+fn default_reference_strength() -> f32 {
+    0.8
+}
+
+fn default_flow_shift() -> f32 {
+    3.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationSettings {
     pub temperature: f32,
     pub steps: u32,
     pub cfg_scale: f32,
+    #[serde(default = "default_sampler")]
+    pub sampler: String,
+    #[serde(default = "default_scheduler")]
+    pub scheduler: String,
+    #[serde(default = "default_reference_strength")]
+    pub reference_strength: f32,
+    #[serde(default = "default_flow_shift")]
+    pub flow_shift: f32,
     pub resolution: ResolutionPreset,
     #[serde(default = "default_video_resolution")]
     pub video_resolution: VideoResolutionPreset,
@@ -250,6 +274,10 @@ pub struct GenerateRequest {
     #[serde(default)]
     pub negative_prompt: Option<String>,
     #[serde(default)]
+    pub selected_lora: Option<String>,
+    #[serde(default)]
+    pub selected_lora_weight: Option<f32>,
+    #[serde(default)]
     pub prompt_assist: PromptAssistMode,
     pub model: String,
     pub kind: MediaKind,
@@ -278,6 +306,10 @@ pub struct GenerateRequest {
     pub audio_literal_prompt: Option<String>,
     #[serde(default)]
     pub audio_segments: Vec<AudioPromptSegment>,
+    #[serde(default)]
+    pub manual_focus_tags: Vec<String>,
+    #[serde(default)]
+    pub manual_assumptions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -350,6 +382,12 @@ impl GenerateRequest {
                 .join(" | "),
         )
     }
+
+    pub fn normalized_lora_weight(&self) -> Option<f32> {
+        self.selected_lora_weight
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 2.0))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,7 +434,23 @@ pub struct PrepareResponse {
     pub hardware_note: String,
     pub reference_note: Option<String>,
     #[serde(default)]
+    pub selected_lora_name: Option<String>,
+    #[serde(default)]
+    pub selected_lora_weight: Option<f32>,
+    #[serde(default)]
     pub supports_voice_output: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoraInfo {
+    pub id: String,
+    pub name: String,
+    pub file_name: String,
+    pub relative_path: String,
+    pub family: String,
+    pub family_key: String,
+    pub runtime_supported: bool,
+    pub compatibility_note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +468,8 @@ pub struct ModelInfo {
     pub supported_kinds: Vec<MediaKind>,
     pub requires_reference: bool,
     pub supports_image_reference: bool,
+    #[serde(default)]
+    pub supports_reference_strength: bool,
     #[serde(default)]
     pub requires_end_image_reference: bool,
     #[serde(default)]
@@ -499,6 +555,10 @@ pub struct OutputEntry {
     pub prompt_assist: PromptAssistMode,
     #[serde(default)]
     pub interpreter_model: Option<String>,
+    #[serde(default)]
+    pub lora_name: Option<String>,
+    #[serde(default)]
+    pub lora_weight: Option<f32>,
     pub file_name: String,
     pub relative_path: String,
     pub url: String,

@@ -1637,6 +1637,10 @@ mod tests {
                 temperature: 0.6,
                 steps: 24,
                 cfg_scale: 6.0,
+                sampler: "euler".to_string(),
+                scheduler: "default".to_string(),
+                reference_strength: 0.8,
+                flow_shift: 3.0,
                 resolution: ResolutionPreset::Square512,
                 video_resolution: VideoResolutionPreset::Square256,
                 video_duration_seconds: 2,
@@ -1649,6 +1653,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_lora: None,
+            selected_lora_weight: None,
             prepared_prompt: None,
             prepared_negative_prompt: None,
             prepared_note: None,
@@ -1656,6 +1662,8 @@ mod tests {
             prepared_spoken_text: None,
             audio_literal_prompt: None,
             audio_segments: vec![],
+            manual_focus_tags: Vec::new(),
+            manual_assumptions: Vec::new(),
         };
 
         let prompt = compose_stable_audio_segment_prompt(
