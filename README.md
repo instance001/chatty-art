@@ -1,4 +1,6 @@
 # Chatty-art
+Sister repo to local, AWD Windows focused LoRA trainer found at:
+https://github.com/instance001/chatty-lora
 
 ![Chatty-art screenshot](<./Screenshot 2026-03-20 104930.png>)
 
