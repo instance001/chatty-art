@@ -27,7 +27,7 @@ impl MediaKind {
         match self {
             Self::Image => "png",
             Self::Gif => "gif",
-            Self::Video => "avi",
+            Self::Video => "mp4",
             Self::Audio => "wav",
         }
     }
@@ -36,7 +36,7 @@ impl MediaKind {
         match self {
             Self::Image => "image/png",
             Self::Gif => "image/gif",
-            Self::Video => "video/x-msvideo",
+            Self::Video => "video/mp4",
             Self::Audio => "audio/wav",
         }
     }
@@ -91,6 +91,12 @@ pub struct BackendRuntimeStatus {
     pub label: String,
     pub acceleration: RuntimeAcceleration,
     pub note: String,
+    #[serde(default)]
+    pub tooling_label: Option<String>,
+    #[serde(default)]
+    pub tooling_note: Option<String>,
+    #[serde(default)]
+    pub tooling_ready: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,6 +284,8 @@ pub struct GenerateRequest {
     #[serde(default)]
     pub selected_lora_weight: Option<f32>,
     #[serde(default)]
+    pub selected_loras: Vec<LoraSelection>,
+    #[serde(default)]
     pub prompt_assist: PromptAssistMode,
     pub model: String,
     pub kind: MediaKind,
@@ -310,6 +318,13 @@ pub struct GenerateRequest {
     pub manual_focus_tags: Vec<String>,
     #[serde(default)]
     pub manual_assumptions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoraSelection {
+    pub id: String,
+    #[serde(default)]
+    pub weight: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -388,6 +403,49 @@ impl GenerateRequest {
             .filter(|value| value.is_finite())
             .map(|value| value.clamp(0.0, 2.0))
     }
+
+    pub fn normalized_lora_selections(&self) -> Vec<LoraSelection> {
+        use std::collections::HashSet;
+
+        let mut normalized = Vec::new();
+        let mut seen = HashSet::new();
+
+        for selection in &self.selected_loras {
+            let id = selection.id.trim();
+            if id.is_empty() {
+                continue;
+            }
+
+            let key = id.to_ascii_lowercase();
+            if !seen.insert(key) {
+                continue;
+            }
+
+            normalized.push(LoraSelection {
+                id: id.to_string(),
+                weight: selection
+                    .weight
+                    .filter(|value| value.is_finite())
+                    .map(|value| value.clamp(0.0, 2.0)),
+            });
+        }
+
+        if normalized.is_empty() {
+            if let Some(id) = self
+                .selected_lora
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                normalized.push(LoraSelection {
+                    id: id.to_string(),
+                    weight: self.normalized_lora_weight(),
+                });
+            }
+        }
+
+        normalized
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,6 +495,8 @@ pub struct PrepareResponse {
     pub selected_lora_name: Option<String>,
     #[serde(default)]
     pub selected_lora_weight: Option<f32>,
+    #[serde(default)]
+    pub selected_lora_labels: Vec<String>,
     #[serde(default)]
     pub supports_voice_output: bool,
 }
@@ -559,6 +619,8 @@ pub struct OutputEntry {
     pub lora_name: Option<String>,
     #[serde(default)]
     pub lora_weight: Option<f32>,
+    #[serde(default)]
+    pub lora_labels: Vec<String>,
     pub file_name: String,
     pub relative_path: String,
     pub url: String,

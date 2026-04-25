@@ -19,6 +19,7 @@ const state = {
   generationStyle: "expressive",
   workflowMode: "basic",
   audioSegments: [],
+  loraSelections: [],
   preparedHandoff: null,
 };
 
@@ -110,11 +111,10 @@ const elements = {
   schedulerInput: document.getElementById("schedulerInput"),
   schedulerCopy: document.getElementById("schedulerCopy"),
   loraCard: document.getElementById("loraCard"),
-  loraInput: document.getElementById("loraInput"),
+  loraList: document.getElementById("loraList"),
+  addLoraButton: document.getElementById("addLoraButton"),
+  loraDetectedCount: document.getElementById("loraDetectedCount"),
   loraCopy: document.getElementById("loraCopy"),
-  loraWeightCard: document.getElementById("loraWeightCard"),
-  loraWeightInput: document.getElementById("loraWeightInput"),
-  loraWeightValue: document.getElementById("loraWeightValue"),
   loraWeightCopy: document.getElementById("loraWeightCopy"),
   referenceStrengthCard: document.getElementById("referenceStrengthCard"),
   referenceStrengthInput: document.getElementById("referenceStrengthInput"),
@@ -181,7 +181,6 @@ const GPU_TELEMETRY_HEIGHT = 44;
 bindSettingDisplay(elements.temperatureInput, elements.temperatureValue, (value) => Number(value).toFixed(1));
 bindSettingDisplay(elements.stepsInput, elements.stepsValue, (value) => `${value}`);
 bindSettingDisplay(elements.cfgInput, elements.cfgValue, (value) => Number(value).toFixed(1));
-bindSettingDisplay(elements.loraWeightInput, elements.loraWeightValue, (value) => Number(value).toFixed(2));
 bindSettingDisplay(elements.referenceStrengthInput, elements.referenceStrengthValue, (value) => Number(value).toFixed(2));
 bindSettingDisplay(elements.flowShiftInput, elements.flowShiftValue, (value) => Number(value).toFixed(1));
 
@@ -191,8 +190,6 @@ const trackedSettingInputs = [
   elements.cfgInput,
   elements.samplerInput,
   elements.schedulerInput,
-  elements.loraInput,
-  elements.loraWeightInput,
   elements.referenceStrengthInput,
   elements.flowShiftInput,
   elements.resolutionInput,
@@ -219,6 +216,11 @@ elements.toggleTray.addEventListener("click", () => toggleTray(false));
 elements.showLeftColumn.addEventListener("click", () => toggleColumn("left", true));
 elements.showCenterColumn.addEventListener("click", () => toggleColumn("center", true));
 elements.showTray.addEventListener("click", () => toggleTray(true));
+elements.addLoraButton.addEventListener("click", () => {
+  addLoraSelection();
+  renderAdvancedRealismSettings();
+  syncActionState();
+});
 elements.modelSelect.addEventListener("change", () => {
   clearPreparedHandoff();
   renderStyleMode();
@@ -534,7 +536,7 @@ function refreshAdvancedRealismSettingCopy() {
   const flowShift = Number(elements.flowShiftInput.value || 0);
   const isEditIntent = state.referenceIntent === "edit";
   const familyLabel = model?.family || "flow-based";
-  const selectedLora = state.loras.find((entry) => entry.id === elements.loraInput.value) || null;
+  const selectedLoras = getSelectedLoraDetails(model);
   const hasStillReference = Boolean(state.primaryReference && state.primaryReference.kind === "image");
 
   elements.samplerCopy.textContent = describeSamplerSetting(samplerValue, samplerLabel);
@@ -547,12 +549,148 @@ function refreshAdvancedRealismSettingCopy() {
   elements.flowShiftCopy.textContent = describeFlowShiftSetting(flowShift, familyLabel);
 
   if (supportsLoraControl(model)) {
-    elements.loraCopy.textContent = describeLoraSelection(model, selectedLora);
-    elements.loraWeightCopy.textContent = describeLoraWeightSetting(
-      Number(elements.loraWeightInput.value || 1),
-      selectedLora
-    );
+    elements.loraCopy.textContent = describeLoraSelection(model, selectedLoras);
+    elements.loraWeightCopy.textContent = describeLoraWeightSetting(selectedLoras);
   }
+}
+
+function createLoraSelection(seed = {}) {
+  return {
+    id: seed.id || "",
+    weight: Number.isFinite(Number(seed.weight)) ? Number(seed.weight) : 1.0,
+  };
+}
+
+function getSelectedLoraDetails(model = getSelectedModel()) {
+  return getNormalizedLoraSelections()
+    .map((selection) => {
+      const lora = getCompatibleLoras(model).find((entry) => entry.id === selection.id) || null;
+      return lora
+        ? { ...selection, lora }
+        : null;
+    })
+    .filter(Boolean);
+}
+
+function getNormalizedLoraSelections() {
+  const seen = new Set();
+  return state.loraSelections
+    .map((selection) => ({
+      id: String(selection.id || "").trim(),
+      weight: clampLoraWeight(selection.weight),
+    }))
+    .filter((selection) => selection.id)
+    .filter((selection) => {
+      const key = selection.id.toLowerCase();
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function clampLoraWeight(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 1;
+  }
+  return Math.min(2, Math.max(0, numeric));
+}
+
+function ensureLoraSelectionSlots() {
+  if (!state.loraSelections.length) {
+    state.loraSelections = [createLoraSelection()];
+  }
+}
+
+function addLoraSelection(seed = {}) {
+  if (state.loraSelections.length >= 6) {
+    return;
+  }
+  state.loraSelections.push(createLoraSelection(seed));
+}
+
+function removeLoraSelection(index) {
+  state.loraSelections = state.loraSelections.filter((_, currentIndex) => currentIndex !== index);
+  ensureLoraSelectionSlots();
+}
+
+function updateLoraSelection(index, nextValue) {
+  const current = state.loraSelections[index];
+  if (!current) {
+    return;
+  }
+  state.loraSelections[index] = {
+    ...current,
+    ...nextValue,
+  };
+}
+
+function renderLoraSelections(model) {
+  const compatibleLoras = getCompatibleLoras(model);
+  ensureLoraSelectionSlots();
+
+  elements.loraList.innerHTML = state.loraSelections.map((selection, index) => {
+    const options = [
+      `<option value="">No LoRA</option>`,
+      ...compatibleLoras.map((lora) => `<option value="${escapeHtml(lora.id)}" ${lora.id === selection.id ? "selected" : ""}>${escapeHtml(lora.name)} | ${escapeHtml(lora.family)}</option>`),
+    ];
+    const canRemove = state.loraSelections.length > 1;
+    return `
+      <div class="lora-stack-row" data-lora-index="${index}">
+        <div class="lora-stack-row-head">
+          <span class="lora-stack-row-title">LoRA ${index + 1}</span>
+          ${canRemove ? `<button class="ghost-button mini-ghost-button" type="button" data-remove-lora="${index}">Remove</button>` : ""}
+        </div>
+        <div class="lora-stack-row-grid">
+          <label>
+            <span>Adapter</span>
+            <select data-lora-select="${index}" ${compatibleLoras.length ? "" : "disabled"}>
+              ${options.join("")}
+            </select>
+            <span class="lora-stack-field-note">${compatibleLoras.length ? "Choose the specific LoRA file to layer into this stack slot." : "No compatible LoRAs are currently available for this model."}</span>
+          </label>
+          <label>
+            <span>Strength</span>
+            <input data-lora-weight="${index}" type="range" min="0" max="2" step="0.05" value="${clampLoraWeight(selection.weight).toFixed(2)}" ${compatibleLoras.length ? "" : "disabled"}>
+            <span class="lora-stack-weight-value">${clampLoraWeight(selection.weight).toFixed(2)}</span>
+            <span class="lora-stack-field-note">This slider only affects LoRA ${index + 1}. Lower keeps it subtle, higher pushes it harder.</span>
+          </label>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  elements.loraList.querySelectorAll("[data-lora-select]").forEach((select) => {
+    select.addEventListener("change", (event) => {
+      const index = Number(event.currentTarget.dataset.loraSelect);
+      updateLoraSelection(index, { id: event.currentTarget.value });
+      clearPreparedHandoff();
+      renderAdvancedRealismSettings();
+      syncActionState();
+    });
+  });
+
+  elements.loraList.querySelectorAll("[data-lora-weight]").forEach((input) => {
+    input.addEventListener("input", (event) => {
+      const index = Number(event.currentTarget.dataset.loraWeight);
+      updateLoraSelection(index, { weight: clampLoraWeight(event.currentTarget.value) });
+      clearPreparedHandoff();
+      renderAdvancedRealismSettings();
+      syncActionState();
+    });
+  });
+
+  elements.loraList.querySelectorAll("[data-remove-lora]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      const index = Number(event.currentTarget.dataset.removeLora);
+      removeLoraSelection(index);
+      clearPreparedHandoff();
+      renderAdvancedRealismSettings();
+      syncActionState();
+    });
+  });
 }
 
 function describeSamplerSetting(value, label) {
@@ -635,38 +773,56 @@ function describeFlowShiftSetting(value, familyLabel) {
   return `${familyLabel} is using a high flow shift of ${value.toFixed(1)}. This is an experimental setting and can noticeably change motion or detail behaviour.`;
 }
 
-function describeLoraSelection(model, selectedLora) {
+function describeLoraSelection(model, selectedLoras) {
   const familyLabel = model?.family || "selected model";
   const familyKey = modelLoraFamilyKey(model) || "family";
   const compatibleLoras = getCompatibleLoras(model);
 
-  if (!selectedLora) {
+  if (!selectedLoras.length) {
     return compatibleLoras.length
-      ? `${compatibleLoras.length} compatible LoRA${compatibleLoras.length === 1 ? "" : "s"} found for ${familyLabel}. Choose one if you want to bolt a more specific style or concept on top of the base model.`
-      : `No compatible LoRAs detected for ${familyLabel}. Put matching files in models/loras/${familyKey}/.`;
+      ? `${compatibleLoras.length} compatible LoRA${compatibleLoras.length === 1 ? "" : "s"} found for ${familyLabel}. Stack one or more if you want to bolt specific style or concept adapters on top of the base model.`
+      : `No compatible LoRAs detected for ${familyLabel}. Put matching files in models/loras/${familyKey}/ or models/lora/${familyKey}/.`;
   }
 
-  return `${selectedLora.name} is active. Think of it as a small style or concept add-on sitting on top of the ${familyLabel} base model.`;
+  if (selectedLoras.length === 1) {
+    return `${selectedLoras[0].lora.name} is active. Think of it as a small style or concept add-on sitting on top of the ${familyLabel} base model.`;
+  }
+
+  return `${selectedLoras.length} LoRAs are stacked on top of ${familyLabel}. Layer them carefully and add one adapter at a time when you are testing, because combined weights can overpower the base model quickly.`;
 }
 
-function describeLoraWeightSetting(weight, selectedLora) {
-  if (!selectedLora) {
-    return "Choose a LoRA first. Lower weights keep it subtle, higher weights push the style harder.";
+function describeLoraWeightSetting(selectedLoras) {
+  if (!selectedLoras.length) {
+    return "Choose at least one LoRA first. Lower weights keep the stack subtle, higher combined weights push the adapters much harder.";
   }
 
-  if (weight <= 0.35) {
-    return `${weight.toFixed(2)} is a very light touch. The LoRA should act more like a hint than a takeover.`;
+  const totalWeight = selectedLoras.reduce((sum, selection) => sum + selection.weight, 0);
+  const strongest = selectedLoras.reduce((max, selection) => Math.max(max, selection.weight), 0);
+
+  if (selectedLoras.length === 1) {
+    const weight = strongest;
+    if (weight <= 0.35) {
+      return `${weight.toFixed(2)} is a very light touch. The LoRA should act more like a hint than a takeover.`;
+    }
+    if (weight <= 0.75) {
+      return `${weight.toFixed(2)} is a gentle LoRA setting. Good when you want the base model to stay in charge.`;
+    }
+    if (weight <= 1.15) {
+      return `${weight.toFixed(2)} is a balanced LoRA setting. This is the best neutral starting point for most tests.`;
+    }
+    if (weight <= 1.5) {
+      return `${weight.toFixed(2)} is a strong LoRA setting. Useful when the LoRA effect feels too weak, but it can start to overpower the base model.`;
+    }
+    return `${weight.toFixed(2)} is a heavy LoRA setting. Treat this as experimental, because it can distort the base model if the match is poor.`;
   }
-  if (weight <= 0.75) {
-    return `${weight.toFixed(2)} is a gentle LoRA setting. Good when you want the base model to stay in charge.`;
+
+  if (totalWeight <= 1.5 && strongest <= 0.9) {
+    return `This stack totals ${totalWeight.toFixed(2)} across ${selectedLoras.length} LoRAs. That is still fairly restrained, and usually a good place to start when layering adapters.`;
   }
-  if (weight <= 1.15) {
-    return `${weight.toFixed(2)} is a balanced LoRA setting. This is the best neutral starting point for most tests.`;
+  if (totalWeight <= 2.4 && strongest <= 1.2) {
+    return `This stack totals ${totalWeight.toFixed(2)} across ${selectedLoras.length} LoRAs. That is a balanced multi-LoRA range, but the adapters can still interact in surprising ways.`;
   }
-  if (weight <= 1.5) {
-    return `${weight.toFixed(2)} is a strong LoRA setting. Useful when the LoRA effect feels too weak, but it can start to overpower the base model.`;
-  }
-  return `${weight.toFixed(2)} is a heavy LoRA setting. Treat this as experimental, because it can distort the base model if the match is poor.`;
+  return `This stack totals ${totalWeight.toFixed(2)} across ${selectedLoras.length} LoRAs. Treat that as experimental territory, because stacked adapters can overpower the base model faster than a single strong LoRA.`;
 }
 
 function createAudioSegment(seed = {}) {
@@ -989,7 +1145,6 @@ function getCompatibleLoras(model = getSelectedModel()) {
 function supportsLoraControl(model = getSelectedModel()) {
   return Boolean(
     supportsAdvancedRealismSettings(model)
-    && getCompatibleLoras(model).length
   );
 }
 
@@ -1003,35 +1158,38 @@ function renderAdvancedRealismSettings() {
   elements.samplerCard.classList.toggle("hidden", !showAdvancedRealism);
   elements.schedulerCard.classList.toggle("hidden", !showAdvancedRealism);
   elements.loraCard.classList.toggle("hidden", !showLora);
-  elements.loraWeightCard.classList.toggle("hidden", !showLora);
   elements.referenceStrengthCard.classList.toggle("hidden", !showReferenceStrength);
   elements.flowShiftCard.classList.toggle("hidden", !showFlowShift);
 
   if (showLora) {
     const compatibleLoras = getCompatibleLoras(model);
-    const currentSelection = elements.loraInput.value;
-    const options = [
-      `<option value="">No LoRA</option>`,
-      ...compatibleLoras.map((lora) => `<option value="${escapeHtml(lora.id)}">${escapeHtml(lora.name)} | ${escapeHtml(lora.family)}</option>`),
-    ];
-    elements.loraInput.innerHTML = options.join("");
-    if (compatibleLoras.some((lora) => lora.id === currentSelection)) {
-      elements.loraInput.value = currentSelection;
-    } else {
-      elements.loraInput.value = "";
-    }
+    state.loraSelections = state.loraSelections.map((selection) => (
+      compatibleLoras.some((lora) => lora.id === selection.id)
+        ? selection
+        : createLoraSelection({ weight: selection.weight })
+    ));
+    renderLoraSelections(model);
+    elements.addLoraButton.disabled = !compatibleLoras.length || state.loraSelections.length >= 6;
+    const familyKey = modelLoraFamilyKey(model) || "family";
+    elements.loraDetectedCount.textContent = compatibleLoras.length
+      ? `LoRAs detected for this model: ${compatibleLoras.length} compatible file${compatibleLoras.length === 1 ? "" : "s"} in ${familyKey}.`
+      : `LoRAs detected for this model: 0 compatible files in ${familyKey}.`;
 
     const familyLabel = model.family || "selected";
     elements.loraCopy.textContent = compatibleLoras.length
-      ? `${compatibleLoras.length} compatible LoRA${compatibleLoras.length === 1 ? "" : "s"} found for ${familyLabel}. Put more in models/loras/${compatibleLoras[0].family_key}/.`
-      : `No compatible LoRAs detected for ${familyLabel}. Put them in models/loras/${modelLoraFamilyKey(model) || "family"}/.`;
-    const weight = Number(elements.loraWeightInput.value || 1);
-    elements.loraWeightCopy.textContent = elements.loraInput.value
-      ? `${weight.toFixed(2)} will be used as the LoRA strength for this run. 1.00 is the safest neutral starting point.`
-      : "Choose a LoRA first. Lower weights keep it subtle, higher weights push the style harder.";
+      ? `${compatibleLoras.length} compatible LoRA${compatibleLoras.length === 1 ? "" : "s"} found for ${familyLabel}. Add one or more rows below and give each row its own strength. Put more in models/loras/${compatibleLoras[0].family_key}/ or models/lora/${compatibleLoras[0].family_key}/.`
+      : `No compatible LoRAs detected for ${familyLabel}. Put them in models/loras/${familyKey}/ or models/lora/${familyKey}/. The LoRA stack panel stays visible here so you can tell this model still supports the Advanced realism LoRA path.`;
+    const selectedLoras = getSelectedLoraDetails(model);
+    elements.loraWeightCopy.textContent = selectedLoras.length
+      ? describeLoraWeightSetting(selectedLoras)
+      : compatibleLoras.length
+        ? "Choose at least one LoRA first. Each row has its own strength slider, and the combined stack can get strong quickly."
+        : "No compatible LoRAs are loaded for this model yet, so the stack rows stay visible as a hint but remain effectively empty.";
   } else {
-    elements.loraInput.innerHTML = `<option value="">No LoRA</option>`;
-    elements.loraInput.value = "";
+    state.loraSelections = [];
+    elements.loraList.innerHTML = "";
+    elements.addLoraButton.disabled = true;
+    elements.loraDetectedCount.textContent = "LoRA detection is waiting for an Advanced realism stable-diffusion model.";
   }
 
   refreshAdvancedRealismSettingCopy();
@@ -1048,10 +1206,19 @@ function renderRuntimeBadges() {
   }
 
   const tone = runtimeAccelerationTone(backendStatus.acceleration);
+  const toolingTone = backendStatus.tooling_ready ? "vulkan" : "warning";
+  const toolingMarkup = backendStatus.tooling_label
+    ? `<span class="runtime-pill runtime-${escapeHtml(toolingTone)}">${escapeHtml(backendStatus.tooling_label)}</span>`
+    : "";
+  const toolingNoteMarkup = backendStatus.tooling_note
+    ? `<span class="runtime-note">${escapeHtml(backendStatus.tooling_note)}</span>`
+    : "";
   elements.runtimeBadges.innerHTML = `
     <span class="runtime-pill">${escapeHtml(formatBackendBadge(backendStatus.backend))}</span>
     <span class="runtime-pill runtime-${escapeHtml(tone)}">${escapeHtml(backendStatus.label)}</span>
     <span class="runtime-note">${escapeHtml(backendStatus.note)}</span>
+    ${toolingMarkup}
+    ${toolingNoteMarkup}
   `;
 }
 
@@ -1283,16 +1450,16 @@ function renderModelSummary(hiddenModeCount = null) {
   if (model.supports_audio_reference) {
     badges.push(createModelBadge("Audio refs optional", "reference"));
   }
-  if (supportsLoraControl(model) && elements.loraInput.value) {
-    const selectedLora = state.loras.find((entry) => entry.id === elements.loraInput.value);
-    if (selectedLora) {
-      badges.push(
-        createModelBadge(
-          `LoRA: ${selectedLora.name} @ ${Number(elements.loraWeightInput.value || 1).toFixed(2)}`,
-          "reference"
-        )
-      );
-    }
+  const selectedLoras = getSelectedLoraDetails(model);
+  if (supportsLoraControl(model) && selectedLoras.length) {
+    badges.push(
+      createModelBadge(
+        selectedLoras.length === 1
+          ? `LoRA: ${selectedLoras[0].lora.name} @ ${selectedLoras[0].weight.toFixed(2)}`
+          : `${selectedLoras.length} LoRAs stacked`,
+        "reference"
+      )
+    );
   }
 
   const hiddenNote = invisibleCount > 0
@@ -2487,11 +2654,11 @@ function renderPreparedHandoff() {
     createPreparedChip(handoff.resolution_label || "Current settings"),
     createPreparedChip(`Estimate ${formatDurationRange(handoff.estimated_time)}`),
     handoff.interpreter_model ? createPreparedChip(`Interpreter ${handoff.interpreter_model}`) : "",
-    handoff.selected_lora_name
-      ? createPreparedChip(
-          `LoRA ${handoff.selected_lora_name} @ ${Number(handoff.selected_lora_weight || 1).toFixed(2)}`
-        )
-      : "",
+    ...(Array.isArray(handoff.selected_lora_labels) && handoff.selected_lora_labels.length
+      ? handoff.selected_lora_labels.map((label) => createPreparedChip(`LoRA ${label}`))
+      : handoff.selected_lora_name
+        ? [createPreparedChip(`LoRA ${handoff.selected_lora_name} @ ${Number(handoff.selected_lora_weight || 1).toFixed(2)}`)]
+        : []),
     handoff.used_original_prompt ? createPreparedChip("Using original wording") : "",
     isSpeechAudio ? createPreparedChip("Speech handoff") : "",
     isSoundAudio ? createPreparedChip("Literal sound lane kept separate") : "",
@@ -2568,7 +2735,8 @@ function buildBasePayload(kind) {
     ? getNormalizedAudioSegments()
     : [];
   const includeManualPromptControls = supportsManualPromptAssistInputs(model);
-  const includeLora = supportsLoraControl(model) && elements.loraInput.value;
+  const selectedLoras = supportsLoraControl(model) ? getNormalizedLoraSelections() : [];
+  const includeLora = selectedLoras.length > 0;
   return {
     prompt,
     negative_prompt: negativePrompt ? negativePrompt : null,
@@ -2601,8 +2769,9 @@ function buildBasePayload(kind) {
     reference_intent: state.referenceIntent,
     end_reference_asset: state.endReference ? state.endReference.id : null,
     control_reference_asset: state.controlReference ? state.controlReference.id : null,
-    selected_lora: includeLora ? elements.loraInput.value : null,
-    selected_lora_weight: includeLora ? Number(elements.loraWeightInput.value) : null,
+    selected_lora: includeLora ? selectedLoras[0].id : null,
+    selected_lora_weight: includeLora ? selectedLoras[0].weight : null,
+    selected_loras: includeLora ? selectedLoras : [],
     prepared_prompt: null,
     prepared_negative_prompt: null,
     prepared_note: null,
@@ -3070,7 +3239,7 @@ function createMediaMarkup(item, className) {
       return `
         <div class="video-fallback ${className}">
           <strong>AVI video saved locally</strong>
-          <span>Your browser may not preview MJPG AVI inline.</span>
+          <span>This older video file may not preview inline. MP4 is now the preferred export format.</span>
           <a href="${escapeAttribute(item.url)}" target="_blank" rel="noreferrer">Open the saved video</a>
         </div>
       `;

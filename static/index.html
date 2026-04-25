@@ -233,18 +233,14 @@
             </label>
 
             <label class="setting-card hidden" id="loraCard">
-              <span class="setting-title">LoRA <button class="help-dot" type="button" data-tip="Advanced realism control. LoRAs are small style or concept adapters that sit on top of a compatible base model. Put them in models/loras/&lt;family&gt;/ and only pair matching families together.">?</button></span>
-              <select id="loraInput">
-                <option value="">No LoRA</option>
-              </select>
-              <span class="setting-copy" id="loraCopy">Choose one compatible LoRA for the selected realism model. Chatty-art filters this list by family.</span>
-            </label>
-
-            <label class="setting-card hidden" id="loraWeightCard">
-              <span class="setting-title">LoRA Weight <button class="help-dot" type="button" data-tip="Advanced realism control. Lower weights keep the LoRA subtle. Higher weights push the LoRA harder, but can distort the base model if you overdo it.">?</button></span>
-              <input id="loraWeightInput" type="range" min="0" max="2" step="0.05" value="1.0">
-              <span class="setting-value" id="loraWeightValue">1.00</span>
-              <span class="setting-copy" id="loraWeightCopy">1.00 is a good neutral starting point. Lower is softer, higher pushes the LoRA style more strongly.</span>
+              <div class="field-title-row">
+                <span class="setting-title">LoRA Stack <button class="help-dot" type="button" data-tip="Advanced realism control. Stack multiple compatible LoRAs on top of one base model. Each added LoRA gets its own strength slider. Keep them family-matched, start with lighter strengths, and add them one at a time when you are testing.">?</button></span>
+                <button id="addLoraButton" class="ghost-button mini-ghost-button" type="button">Add LoRA</button>
+              </div>
+              <span class="setting-copy" id="loraDetectedCount">LoRA detection is waiting for a realism model selection.</span>
+              <div id="loraList" class="lora-stack-list"></div>
+              <span class="setting-copy" id="loraCopy">Choose compatible LoRAs for the selected realism model. Chatty-art filters the list by family.</span>
+              <span class="setting-copy" id="loraWeightCopy">Each LoRA row has its own strength slider. Start with one adapter around 0.60 to 1.00, then layer carefully if you need a stronger combined effect.</span>
             </label>
 
             <label class="setting-card">

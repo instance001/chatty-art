@@ -342,6 +342,9 @@ fn expressive_runtime_status(runtime_dir: &Path) -> BackendRuntimeStatus {
         } else {
             "The bundled llama.cpp runtime is present, but Vulkan support was not detected in the local runtime folder.".to_string()
         },
+        tooling_label: None,
+        tooling_note: None,
+        tooling_ready: false,
     }
 }
 
@@ -578,7 +581,7 @@ async fn list_outputs(State(state): State<AppState>) -> ApiResult<Vec<OutputEntr
 struct ResolvedGenerateContext {
     request: GenerateRequest,
     model: ModelInfo,
-    selected_lora: Option<LoraInfo>,
+    selected_loras: Vec<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
     reference_asset: Option<InputAsset>,
     end_reference_asset: Option<InputAsset>,
@@ -659,8 +662,26 @@ async fn prepare_generate(
         estimated_time,
         hardware_note: state.hardware_profile.note.clone(),
         reference_note: reference_summary.map(|summary| summary.note),
-        selected_lora_name: context.selected_lora.as_ref().map(|lora| lora.name.clone()),
-        selected_lora_weight: context.request.normalized_lora_weight(),
+        selected_lora_name: context.selected_loras.first().map(|lora| lora.name.clone()),
+        selected_lora_weight: context
+            .request
+            .normalized_lora_selections()
+            .first()
+            .and_then(|selection| selection.weight)
+            .or(Some(1.0))
+            .filter(|_| !context.selected_loras.is_empty()),
+        selected_lora_labels: context
+            .selected_loras
+            .iter()
+            .zip(context.request.normalized_lora_selections().iter())
+            .map(|(lora, selection)| {
+                format!(
+                    "{} @ {:.2}",
+                    lora.name,
+                    selection.weight.unwrap_or(1.0)
+                )
+            })
+            .collect(),
         supports_voice_output: context.model.supports_voice_output,
     }))
 }
@@ -678,7 +699,7 @@ async fn start_generate(
             task_state.clone(),
             job_id,
             context.model,
-            context.selected_lora,
+            context.selected_loras,
             context.prompt_interpreter_model,
             context.request,
             context.reference_asset,
@@ -797,22 +818,9 @@ fn resolve_generate_context(
         ));
     }
 
-    let selected_lora = if let Some(requested) = request.selected_lora.as_ref() {
+    let selected_loras = if !request.normalized_lora_selections().is_empty() {
         let loras = scan_loras(&state.paths.models_dir).map_err(internal_error)?;
-        let lora = loras
-            .iter()
-            .find(|candidate| candidate.id == *requested || candidate.relative_path == *requested)
-            .cloned()
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("LoRA '{}' was not found in models/loras/.", requested),
-                )
-            })?;
-
-        if !lora.runtime_supported {
-            return Err((StatusCode::BAD_REQUEST, lora.compatibility_note.clone()));
-        }
+        let mut resolved = Vec::new();
 
         if model.backend != ModelBackend::StableDiffusionCpp {
             return Err((
@@ -822,22 +830,43 @@ fn resolve_generate_context(
             ));
         }
 
-        if !lora_matches_model(&lora, &model) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "'{}' is a {} LoRA, but '{}' expects {}-family LoRAs.",
-                    lora.name,
-                    lora.family,
-                    model.name,
-                    model_lora_family_label(&model)
-                ),
-            ));
+        for requested in request.normalized_lora_selections() {
+            let lora = loras
+                .iter()
+                .find(|candidate| {
+                    candidate.id == requested.id || candidate.relative_path == requested.id
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("LoRA '{}' was not found in models/loras/ or models/lora/.", requested.id),
+                    )
+                })?;
+
+            if !lora.runtime_supported {
+                return Err((StatusCode::BAD_REQUEST, lora.compatibility_note.clone()));
+            }
+
+            if !lora_matches_model(&lora, &model) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "'{}' is a {} LoRA, but '{}' expects {}-family LoRAs.",
+                        lora.name,
+                        lora.family,
+                        model.name,
+                        model_lora_family_label(&model)
+                    ),
+                ));
+            }
+
+            resolved.push(lora);
         }
 
-        Some(lora)
+        resolved
     } else {
-        None
+        Vec::new()
     };
 
     let assets = scan_assets(&state.paths.input_dir, &state.paths.outputs_dir)
@@ -972,7 +1001,7 @@ fn resolve_generate_context(
     Ok(ResolvedGenerateContext {
         request,
         model,
-        selected_lora,
+        selected_loras,
         prompt_interpreter_model,
         reference_asset,
         end_reference_asset,
@@ -1512,7 +1541,7 @@ async fn run_generation_job(
     state: AppState,
     job_id: Uuid,
     model: ModelInfo,
-    selected_lora: Option<LoraInfo>,
+    selected_loras: Vec<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
     request: GenerateRequest,
     reference_asset: Option<InputAsset>,
@@ -1800,7 +1829,7 @@ async fn run_generation_job(
             let output_extension = match request.kind {
                 MediaKind::Image => "png",
                 MediaKind::Gif => "gif",
-                MediaKind::Video => "avi",
+                MediaKind::Video => "mp4",
                 MediaKind::Audio => {
                     return Err(anyhow::anyhow!(
                         "stable-diffusion.cpp does not generate audio in Chatty-art."
@@ -1935,8 +1964,20 @@ async fn run_generation_job(
         spoken_text: effective_request.prepared_spoken_text.clone(),
         prompt_assist: request.prompt_assist,
         interpreter_model: interpreter_model_name,
-        lora_name: selected_lora.as_ref().map(|lora| lora.name.clone()),
-        lora_weight: effective_request.normalized_lora_weight(),
+        lora_name: selected_loras.first().map(|lora| lora.name.clone()),
+        lora_weight: effective_request
+            .normalized_lora_selections()
+            .first()
+            .and_then(|selection| selection.weight)
+            .or(Some(1.0))
+            .filter(|_| !selected_loras.is_empty()),
+        lora_labels: selected_loras
+            .iter()
+            .zip(effective_request.normalized_lora_selections().iter())
+            .map(|(lora, selection)| {
+                format!("{} @ {:.2}", lora.name, selection.weight.unwrap_or(1.0))
+            })
+            .collect(),
         file_name: file_name.clone(),
         relative_path: relative_path.clone(),
         url: format!("/outputs/{relative_path}"),
@@ -2230,56 +2271,58 @@ fn scan_models(
 }
 
 fn scan_loras(models_dir: &Path) -> Result<Vec<LoraInfo>> {
-    let loras_dir = models_dir.join("loras");
-    if !loras_dir.exists() {
+    let lora_dirs = available_lora_dirs(models_dir);
+    if lora_dirs.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut loras = Vec::new();
-    for entry in WalkDir::new(&loras_dir)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-    {
-        let path = entry.path();
-        if !has_extension(path, "safetensors") && !has_extension(path, "ckpt") {
-            continue;
-        }
+    for loras_dir in lora_dirs {
+        for entry in WalkDir::new(&loras_dir)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let path = entry.path();
+            if !has_extension(path, "safetensors") && !has_extension(path, "ckpt") {
+                continue;
+            }
 
-        let relative_path = to_slash_path(path.strip_prefix(models_dir)?);
-        let file_name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let family_key = infer_lora_family_key(&relative_path, &file_name)
-            .unwrap_or_else(|| "unknown".to_string());
-        let runtime_supported = family_key != "unknown";
-        let family = lora_family_label(&family_key).to_string();
-        let compatibility_note = if runtime_supported {
-            format!(
-                "{} LoRA ready for Realism + Advanced. Put compatible files in models/loras/{}/ and pair them with matching {} models.",
-                family, family_key, family
-            )
-        } else {
-            "Detected, but Chatty-art could not determine a compatible LoRA family from this file or folder name. Put LoRAs in models/loras/<family>/ using folders like flux, sd, sd3, wan, or qwen."
-                .to_string()
-        };
-
-        loras.push(LoraInfo {
-            id: relative_path.clone(),
-            name: path
-                .file_stem()
+            let relative_path = to_slash_path(path.strip_prefix(models_dir)?);
+            let file_name = path
+                .file_name()
                 .and_then(|value| value.to_str())
-                .unwrap_or(&file_name)
-                .to_string(),
-            file_name,
-            relative_path,
-            family,
-            family_key,
-            runtime_supported,
-            compatibility_note,
-        });
+                .unwrap_or_default()
+                .to_string();
+            let family_key = infer_lora_family_key(&relative_path, &file_name)
+                .unwrap_or_else(|| "unknown".to_string());
+            let runtime_supported = family_key != "unknown";
+            let family = lora_family_label(&family_key).to_string();
+            let compatibility_note = if runtime_supported {
+                format!(
+                    "{} LoRA ready for Realism + Advanced. Put compatible files in models/loras/{}/ or models/lora/{}/ and pair them with matching {} models.",
+                    family, family_key, family_key, family
+                )
+            } else {
+                "Detected, but Chatty-art could not determine a compatible LoRA family from this file or folder name. Put LoRAs in models/loras/<family>/ or models/lora/<family>/ using folders like flux, sd, sd3, wan, or qwen."
+                    .to_string()
+            };
+
+            loras.push(LoraInfo {
+                id: relative_path.clone(),
+                name: path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(&file_name)
+                    .to_string(),
+                file_name,
+                relative_path,
+                family,
+                family_key,
+                runtime_supported,
+                compatibility_note,
+            });
+        }
     }
 
     loras.sort_by(|left, right| {
@@ -2288,6 +2331,14 @@ fn scan_loras(models_dir: &Path) -> Result<Vec<LoraInfo>> {
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
     Ok(loras)
+}
+
+fn available_lora_dirs(models_dir: &Path) -> Vec<PathBuf> {
+    ["loras", "lora"]
+        .into_iter()
+        .map(|name| models_dir.join(name))
+        .filter(|path| path.exists() && path.is_dir())
+        .collect()
 }
 
 fn infer_lora_family_key(relative_path: &str, file_name: &str) -> Option<String> {
@@ -2524,6 +2575,7 @@ fn scan_outputs(outputs_dir: &Path) -> Result<Vec<OutputEntry>> {
             interpreter_model: None,
             lora_name: None,
             lora_weight: None,
+            lora_labels: Vec::new(),
             file_name: path
                 .file_name()
                 .and_then(|value| value.to_str())
@@ -3326,6 +3378,7 @@ mod tests {
             control_reference_asset: None,
             selected_lora: None,
             selected_lora_weight: None,
+            selected_loras: Vec::new(),
             prepared_prompt: Some(
                 "cinematic city rain ambience, spacious stereo field, soft reflections"
                     .to_string(),
@@ -3392,6 +3445,7 @@ mod tests {
             control_reference_asset: None,
             selected_lora: None,
             selected_lora_weight: None,
+            selected_loras: Vec::new(),
             prepared_prompt: None,
             prepared_negative_prompt: None,
             prepared_note: None,
@@ -3437,6 +3491,7 @@ mod tests {
             control_reference_asset: None,
             selected_lora: None,
             selected_lora_weight: None,
+            selected_loras: Vec::new(),
             prepared_prompt: None,
             prepared_negative_prompt: None,
             prepared_note: None,

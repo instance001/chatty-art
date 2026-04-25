@@ -1655,6 +1655,7 @@ mod tests {
             control_reference_asset: None,
             selected_lora: None,
             selected_lora_weight: None,
+            selected_loras: Vec::new(),
             prepared_prompt: None,
             prepared_negative_prompt: None,
             prepared_note: None,

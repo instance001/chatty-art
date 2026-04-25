@@ -132,6 +132,7 @@ pub fn detect_sdcpp_support(
 pub fn realism_runtime_status(diffuse_runtime_dir: &Path) -> BackendRuntimeStatus {
     let build_mode = detect_sdcpp_build_mode(diffuse_runtime_dir);
     let build_exists = find_sd_cli(diffuse_runtime_dir).is_some();
+    let video_tooling = detect_video_tooling_status();
 
     if !diffuse_runtime_dir.join("CMakeLists.txt").exists() {
         return BackendRuntimeStatus {
@@ -139,6 +140,9 @@ pub fn realism_runtime_status(diffuse_runtime_dir: &Path) -> BackendRuntimeStatu
             label: "Runtime missing".to_string(),
             acceleration: RuntimeAcceleration::IncompleteTree,
             note: "Add a full stable-diffusion.cpp source tree to diffuse_runtime/ to enable realism mode.".to_string(),
+            tooling_label: Some(video_tooling.label),
+            tooling_note: Some(video_tooling.note),
+            tooling_ready: video_tooling.ready,
         };
     }
 
@@ -152,6 +156,9 @@ pub fn realism_runtime_status(diffuse_runtime_dir: &Path) -> BackendRuntimeStatu
             label: "Runtime incomplete".to_string(),
             acceleration: RuntimeAcceleration::IncompleteTree,
             note: "diffuse_runtime/ggml is missing. Use a stable-diffusion.cpp checkout with submodules, not a partial source zip.".to_string(),
+            tooling_label: Some(video_tooling.label),
+            tooling_note: Some(video_tooling.note),
+            tooling_ready: video_tooling.ready,
         };
     }
 
@@ -161,32 +168,92 @@ pub fn realism_runtime_status(diffuse_runtime_dir: &Path) -> BackendRuntimeStatu
             label: "Vulkan".to_string(),
             acceleration: RuntimeAcceleration::Vulkan,
             note: "stable-diffusion.cpp is built with Vulkan acceleration for realism jobs.".to_string(),
+            tooling_label: Some(video_tooling.label),
+            tooling_note: Some(video_tooling.note),
+            tooling_ready: video_tooling.ready,
         },
         Some(SdcppBuildMode::CpuOnly) => BackendRuntimeStatus {
             backend: ModelBackend::StableDiffusionCpp,
             label: "CPU-only".to_string(),
             acceleration: RuntimeAcceleration::CpuOnly,
             note: "stable-diffusion.cpp is currently built without Vulkan. Large Wan video jobs can take a very long time.".to_string(),
+            tooling_label: Some(video_tooling.label),
+            tooling_note: Some(video_tooling.note),
+            tooling_ready: video_tooling.ready,
         },
         None if build_exists && has_vulkan_sdk() => BackendRuntimeStatus {
             backend: ModelBackend::StableDiffusionCpp,
             label: "Build pending".to_string(),
             acceleration: RuntimeAcceleration::BuildPending,
             note: "A stable-diffusion.cpp binary exists, but Chatty-art could not confirm whether it was built with Vulkan. The next realism run may rebuild it.".to_string(),
+            tooling_label: Some(video_tooling.label),
+            tooling_note: Some(video_tooling.note),
+            tooling_ready: video_tooling.ready,
         },
         None if has_vulkan_sdk() => BackendRuntimeStatus {
             backend: ModelBackend::StableDiffusionCpp,
             label: "Build pending".to_string(),
             acceleration: RuntimeAcceleration::BuildPending,
             note: "sd-cli is not built yet. The first realism run should build stable-diffusion.cpp with Vulkan.".to_string(),
+            tooling_label: Some(video_tooling.label),
+            tooling_note: Some(video_tooling.note),
+            tooling_ready: video_tooling.ready,
         },
         None => BackendRuntimeStatus {
             backend: ModelBackend::StableDiffusionCpp,
             label: "Build pending".to_string(),
             acceleration: RuntimeAcceleration::BuildPending,
             note: "sd-cli is not built yet. No Vulkan SDK was detected, so the first realism build will be CPU-only unless you install Vulkan first.".to_string(),
+            tooling_label: Some(video_tooling.label),
+            tooling_note: Some(video_tooling.note),
+            tooling_ready: video_tooling.ready,
         },
     }
+}
+
+#[derive(Debug, Clone)]
+struct VideoToolingStatus {
+    ready: bool,
+    label: String,
+    note: String,
+}
+
+fn detect_video_tooling_status() -> VideoToolingStatus {
+    let ffmpeg_ready = command_available("ffmpeg");
+    let ffprobe_ready = command_available("ffprobe");
+
+    match (ffmpeg_ready, ffprobe_ready) {
+        (true, true) => VideoToolingStatus {
+            ready: true,
+            label: "FFmpeg ready".to_string(),
+            note: "FFmpeg and FFprobe are available in PATH. MP4 export and control-video unpacking are ready.".to_string(),
+        },
+        (true, false) => VideoToolingStatus {
+            ready: false,
+            label: "FFprobe missing".to_string(),
+            note: "FFmpeg is available, but FFprobe was not found in PATH. If you just installed FFmpeg, restart Chatty-art or open a new terminal so the updated PATH is visible.".to_string(),
+        },
+        (false, true) => VideoToolingStatus {
+            ready: false,
+            label: "FFmpeg missing".to_string(),
+            note: "FFprobe is available, but FFmpeg was not found in PATH. MP4 export needs FFmpeg itself, and a restart may be needed if you just installed it.".to_string(),
+        },
+        (false, false) => VideoToolingStatus {
+            ready: false,
+            label: "FFmpeg missing".to_string(),
+            note: "FFmpeg and FFprobe were not found in PATH. MP4 export and control-video unpacking will stay unavailable until Chatty-art can see them. If you just installed them, restart the app or open a new terminal session.".to_string(),
+        },
+    }
+}
+
+fn command_available(command: &str) -> bool {
+    std::process::Command::new(command)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 pub async fn generate_with_sdcpp(
@@ -334,11 +401,18 @@ pub async fn generate_with_sdcpp(
                 gif_result
             }
             MediaKind::Video => {
+                let avi_output_path = output_path.with_extension("avi");
+                if avi_output_path.exists() {
+                    let _ = fs::remove_file(&avi_output_path).await;
+                }
                 args.push("-o".to_string());
-                args.push(output_path.display().to_string());
+                args.push(avi_output_path.display().to_string());
                 run_sd_cli(&cli_path, diffuse_runtime_dir, &args).await?;
 
-                normalize_sdcpp_video_output(output_path)?;
+                normalize_sdcpp_video_output(&avi_output_path)?;
+                let convert_result = convert_video_to_mp4(&avi_output_path, output_path).await;
+                let _ = fs::remove_file(&avi_output_path).await;
+                convert_result?;
 
                 Ok(SdcppGeneration {
                     mime: request.kind.output_mime().to_string(),
@@ -490,39 +564,77 @@ fn append_lora_runtime_args(
     request: &GenerateRequest,
     models_dir: &Path,
 ) -> Result<()> {
-    let Some(selected_lora) = request.selected_lora.as_deref() else {
+    let selected_loras = request.normalized_lora_selections();
+    if selected_loras.is_empty() {
         return Ok(());
-    };
-
-    let lora_path = models_dir.join(native_relative_path(selected_lora));
-    if !lora_path.exists() {
-        bail!(
-            "The selected LoRA '{}' is missing from models/loras/.",
-            selected_lora
-        );
     }
 
-    let lora_stem = lora_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| anyhow!("The selected LoRA file name is not valid for the local runtime."))?;
-    let lora_parent = lora_path
-        .parent()
-        .ok_or_else(|| anyhow!("The selected LoRA path does not have a parent directory."))?;
-    let weight = request.normalized_lora_weight().unwrap_or(1.0);
-    let prompt_tag = format!(" <lora:{lora_stem}:{}>", format_float_arg(weight));
+    let mut prompt_tags = Vec::new();
+    for selection in selected_loras {
+        let lora_path = models_dir.join(native_relative_path(&selection.id));
+        if !lora_path.exists() {
+            bail!(
+                "The selected LoRA '{}' is missing from models/loras/ or models/lora/.",
+                selection.id
+            );
+        }
+
+        let lora_root = lora_root_for_path(models_dir, &lora_path).ok_or_else(|| {
+            anyhow!(
+                "The selected LoRA '{}' must live under models/loras/ or models/lora/.",
+                selection.id
+            )
+        })?;
+
+        let relative_name = lora_path
+            .strip_prefix(&lora_root)
+            .ok()
+            .map(native_to_forward_slashes)
+            .unwrap_or_else(|| {
+                lora_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default()
+                    .to_string()
+            });
+        let tag_name = relative_name
+            .trim_end_matches(".safetensors")
+            .trim_end_matches(".ckpt")
+            .to_string();
+        if tag_name.trim().is_empty() {
+            bail!("One of the selected LoRA file names is not valid for the local runtime.");
+        }
+
+        let weight = selection.weight.unwrap_or(1.0);
+        prompt_tags.push(format!(" <lora:{tag_name}:{}>", format_float_arg(weight)));
+    }
 
     if let Some(prompt_index) = args.iter().position(|value| value == "-p") {
         if let Some(prompt) = args.get_mut(prompt_index + 1) {
-            prompt.push_str(&prompt_tag);
+            for tag in prompt_tags {
+                prompt.push_str(&tag);
+            }
         }
     }
 
     args.push("--lora-model-dir".to_string());
-    args.push(lora_parent.display().to_string());
+    args.push(models_dir.display().to_string());
 
     Ok(())
+}
+
+fn native_to_forward_slashes(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn lora_root_for_path(models_dir: &Path, lora_path: &Path) -> Option<PathBuf> {
+    ["loras", "lora"]
+        .into_iter()
+        .map(|name| models_dir.join(name))
+        .find(|root| lora_path.starts_with(root))
 }
 
 fn normalize_sampling_method(value: &str) -> &'static str {
@@ -736,6 +848,52 @@ fn normalize_sdcpp_video_output(output_path: &Path) -> Result<()> {
         "stable-diffusion.cpp finished without creating {}.",
         output_path.display()
     );
+}
+
+async fn convert_video_to_mp4(source_path: &Path, output_path: &Path) -> Result<()> {
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(source_path)
+        .arg("-movflags")
+        .arg("+faststart")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-c:v")
+        .arg("libx264")
+        .arg(output_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to launch ffmpeg to convert '{}' into MP4",
+                source_path.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Chatty-art generated an AVI video at '{}' but could not convert it to MP4.\nInstall ffmpeg and try again, or inspect the saved AVI manually.\n{}\n{}",
+            source_path.display(),
+            summarize_output("stdout", &stdout),
+            summarize_output("stderr", &stderr)
+        );
+    }
+
+    if !output_path.exists() {
+        bail!(
+            "ffmpeg reported success, but the MP4 output '{}' was not created.",
+            output_path.display()
+        );
+    }
+
+    Ok(())
 }
 
 async fn prepare_control_video_frames(
@@ -1674,7 +1832,7 @@ impl RuntimeRecipe {
                     .to_string()
             }
             (RuntimeFamily::Wan, MediaKind::Video) => {
-                "Generated locally with stable-diffusion.cpp using the Wan video path and saved as an MJPG AVI video."
+                "Generated locally with stable-diffusion.cpp using the Wan video path, then converted into an MP4 video."
                     .to_string()
             }
             (RuntimeFamily::Wan, MediaKind::Audio) => {
@@ -2537,6 +2695,7 @@ mod tests {
             control_reference_asset: None,
             selected_lora: None,
             selected_lora_weight: None,
+            selected_loras: Vec::new(),
             prepared_prompt: None,
             prepared_negative_prompt: None,
             prepared_note: None,
@@ -3338,5 +3497,18 @@ mod tests {
         .unwrap();
         assert!(support.runtime_supported, "{support:?}");
         assert!(support.requires_reference);
+    }
+
+    #[test]
+    fn normalize_video_output_accepts_appended_avi_name() {
+        let dir = temp_dir("normalize-video-output");
+        let output_path = dir.join("result.avi");
+        let appended = PathBuf::from(format!("{}.avi", output_path.display()));
+        fs::write(&appended, b"avi-bytes").unwrap();
+
+        normalize_sdcpp_video_output(&output_path).unwrap();
+
+        assert!(output_path.exists());
+        assert!(!appended.exists());
     }
 }

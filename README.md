@@ -338,21 +338,25 @@ The current advanced realism controls are:
   These are useful when the base prompt is short and you want to lock in a few concrete assumptions yourself instead of relying on the automatic expansion stage.
 
 - `LoRA`
-  Only appears for realism model families that have compatible LoRA files available.
-  Chatty-art currently supports one LoRA at a time in `Realism + Advanced`.
-  Put LoRA files in `models/loras/<family>/`, for example:
+  Appears in `Realism + Advanced` for local `stable-diffusion.cpp` realism models.
+  Chatty-art supports a small LoRA stack here, with a separate strength slider for each added LoRA row.
+  Put LoRA files in `models/loras/<family>/` or `models/lora/<family>/`, for example:
   - `models/loras/flux/`
   - `models/loras/sd/`
   - `models/loras/sd3/`
   - `models/loras/wan/`
+  - `models/lora/flux/`
+  - `models/lora/sd/`
+  - `models/lora/sd3/`
+  - `models/lora/wan/`
   Supported LoRA file types are `.safetensors` and `.ckpt`.
   Chatty-art will only show LoRAs that match the selected model family.
 
-- `LoRA Weight`
-  Controls how strongly the selected LoRA influences the result.
+- `LoRA Strength`
+  Each added LoRA row has its own strength slider.
   Lower values are gentler.
-  Higher values push harder toward the LoRA style or subject behavior.
-  If you are just starting, `1.0` is a sensible default.
+  Higher values push harder toward that LoRA's style or subject behavior.
+  If you are just starting, around `0.6` to `1.0` per LoRA is a sensible range.
 
 Simple beginner advice:
 
@@ -385,12 +389,13 @@ Good beginner mental model:
 In Chatty-art today:
 
 - LoRA is available in `Realism + Advanced`
-- Chatty-art currently supports one LoRA at a time
+- Chatty-art supports a small stacked LoRA workflow
+- each added LoRA gets its own strength slider
 - Chatty-art only shows LoRAs that match the selected model family
 
 ### Where LoRAs Go
 
-Put LoRA files inside `models/loras/<family>/`
+Put LoRA files inside `models/loras/<family>/` or `models/lora/<family>/`
 
 Examples:
 
@@ -398,6 +403,10 @@ Examples:
 - `models/loras/sd/`
 - `models/loras/sd3/`
 - `models/loras/wan/`
+- `models/lora/flux/`
+- `models/lora/sd/`
+- `models/lora/sd3/`
+- `models/lora/wan/`
 
 Supported file types:
 
@@ -442,9 +451,11 @@ If you are new:
 
 - get the base model working first
 - turn LoRA on only after the base model is already producing sensible results
-- start around `LoRA Weight = 1.0`
-- if the result becomes too distorted or overpowering, lower the weight
+- start with one LoRA before building a stack
+- start around `LoRA Strength = 0.6` to `1.0`
+- if the result becomes too distorted or overpowering, lower the strength
 - if the LoRA effect is too weak, raise it slowly
+- if you stack multiple LoRAs, add them one at a time and keep the first stacked pass conservative
 - only change one advanced control at a time
 
 ## Run
@@ -511,8 +522,9 @@ The app opens at `http://127.0.0.1:7878`.
 - Expressive audio output is saved as `.wav`
 - Realism image output is saved as `.png`
 - Realism GIF output is saved as `.gif`
-- Realism true video output is saved as `.avi` for the families that support real local video
+- Realism true video output is saved as `.mp4` for the families that support real local video
 - Realism audio output is saved as `.wav`
-- Some browsers do not preview `.avi` inline cleanly, so GIF is still the easiest animated preview format
+- GIF is still the easiest lightweight animated preview format, but realism video now exports in the more trainer-friendly `.mp4` format
+- MP4 export and control-video unpacking depend on local `ffmpeg` and `ffprobe` being available in `PATH`
 - If a model returns invalid JSON during planning, Chatty-art falls back to a deterministic local renderer so the job can still finish cleanly.
 - Expressive runs now also save raw planner sidecars as `*.planner.json`, and Prompt Assist runs save compiler sidecars as `*.compiler.json`.

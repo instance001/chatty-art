@@ -11,6 +11,12 @@
 /audio_runtime/**/.venv/
 /models/*
 !/models/.gitkeep
+!/models/lora/
+!/models/lora/**/
+!/models/lora/**/.gitkeep
+!/models/loras/
+!/models/loras/**/
+!/models/loras/**/.gitkeep
 /input/audio/*
 !/input/audio/.gitkeep
 /input/images/*

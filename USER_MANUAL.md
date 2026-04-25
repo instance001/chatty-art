@@ -837,7 +837,7 @@ When to use it:
 This only appears when:
 
 - the selected realism model family supports LoRAs
-- and you have compatible LoRA files available locally
+- and you are in `Realism + Advanced`
 
 Where LoRA files go:
 
@@ -845,6 +845,10 @@ Where LoRA files go:
 - `models/loras/sd/`
 - `models/loras/sd3/`
 - `models/loras/wan/`
+- `models/lora/flux/`
+- `models/lora/sd/`
+- `models/lora/sd3/`
+- `models/lora/wan/`
 
 Supported LoRA file types:
 
@@ -854,21 +858,24 @@ Supported LoRA file types:
 Plain-language meaning:
 
 - a LoRA is a small add-on that nudges the base model toward a style, subject, look, or behavior
-- Chatty-art currently supports one LoRA at a time in `Realism + Advanced`
+- Chatty-art now supports a small LoRA stack in `Realism + Advanced`
+- each added LoRA row gets its own strength slider
 - Chatty-art only shows LoRAs that match the selected model family
 
-### LoRA Weight
+### LoRA Strength
 
 Plain-language meaning:
 
-- lower = gentler effect
-- higher = stronger LoRA influence
+- lower = gentler effect for that LoRA row
+- higher = stronger influence from that LoRA row
 
 Beginner advice:
 
-- start around `1.0`
+- start with one LoRA first
+- start around `0.6` to `1.0` per LoRA
 - if the LoRA is overpowering the image, lower it
 - if the LoRA is barely doing anything, raise it slowly
+- if you stack multiple LoRAs, add them one at a time and keep the first stacked pass conservative
 
 ### Beginner rule
 
@@ -943,7 +950,8 @@ If the base model is fighting you already, fix that first before adding a LoRA.
 In Chatty-art today:
 
 - LoRAs are available in `Realism + Advanced`
-- Chatty-art currently supports one LoRA at a time
+- Chatty-art supports a small stacked LoRA workflow
+- each added LoRA gets its own strength slider
 - Chatty-art only shows LoRAs that match the selected model family
 
 That means Chatty-art is trying to protect you from obvious mismatches.
@@ -956,6 +964,10 @@ Put LoRAs into one of these folders:
 - `models/loras/sd/`
 - `models/loras/sd3/`
 - `models/loras/wan/`
+- `models/lora/flux/`
+- `models/lora/sd/`
+- `models/lora/sd3/`
+- `models/lora/wan/`
 
 Supported file types:
 
@@ -1017,8 +1029,9 @@ The safest test flow is:
 2. Generate a result you already roughly like.
 3. Turn on one LoRA.
 4. Leave the other advanced controls alone.
-5. Start around `LoRA Weight = 1.0`.
+5. Start around `LoRA Strength = 0.6` to `1.0`.
 6. Compare before and after.
+7. Only build a stack after the single-LoRA pass already looks sensible.
 
 If the LoRA is too strong:
 
@@ -1469,7 +1482,8 @@ Chatty-art saves files automatically.
 - Expressive audio is saved as `.wav`
 - Realism images are saved as `.png`
 - Realism GIFs are saved as `.gif`
-- Realism true videos are saved as `.avi`
+- Realism true videos are saved as `.mp4`
+- MP4 export and control-video unpacking depend on local `ffmpeg` and `ffprobe` being available in `PATH`
 
 You do not need to press Save.
 
@@ -1510,7 +1524,7 @@ Realism mode is different:
 - it uses local `stable-diffusion.cpp`
 - it is better suited to photoreal or model-specific diffusion/GIF/video workflows
 - some advanced GGUFs also need extra local companion weights in `models/`
-- browser preview is usually smooth for GIF output, while `.avi` video support depends on the browser
+- browser preview is usually smooth for GIF output, and realism video now exports as `.mp4` for better browser and trainer compatibility
 
 ## If the model does not appear in the dropdown
 
