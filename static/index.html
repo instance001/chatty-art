@@ -326,7 +326,15 @@
         <article class="panel">
           <div class="panel-header">
             <h2>Generate</h2>
-            <span class="panel-note">One job at a time for a simple local workflow</span>
+            <span class="panel-note">Run one job or repeat the same job sequentially</span>
+          </div>
+
+          <div class="field-row compact-field-row">
+            <label class="field-block">
+              <span class="field-title">Sequential Batch Count</span>
+              <input id="batchCountInput" type="number" min="1" max="64" step="1" value="1">
+              <span class="setting-copy" id="batchCountCopy">Runs the same prompt, settings, and LoRA stack one generation at a time from start to finish. Each extra run uses a fresh random seed, like clearing the seed box and pressing Generate again.</span>
+            </label>
           </div>
 
           <div class="button-row">

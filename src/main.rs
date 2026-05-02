@@ -692,10 +692,16 @@ async fn start_generate(
 ) -> ApiResult<GenerateAccepted> {
     let context = resolve_generate_context(&state, request)?;
     let job_id = Uuid::new_v4();
+    let batch_total = context.request.normalized_batch_count();
+    let accepted_seed = if batch_total == 1 {
+        Some(u64::from(context.used_seed))
+    } else {
+        None
+    };
 
     let task_state = state.clone();
     tokio::spawn(async move {
-        if let Err(error) = run_generation_job(
+        if let Err(error) = run_generation_batch(
             task_state.clone(),
             job_id,
             context.model,
@@ -705,9 +711,9 @@ async fn start_generate(
             context.reference_asset,
             context.end_reference_asset,
             context.control_reference_asset,
+            context.used_seed,
         )
-        .await
-        {
+        .await {
             let _ = task_state.events.send(ServerEvent::Error {
                 job_id,
                 message: error.to_string(),
@@ -718,7 +724,8 @@ async fn start_generate(
 
     Ok(Json(GenerateAccepted {
         job_id,
-        used_seed: u64::from(context.used_seed),
+        used_seed: accepted_seed,
+        batch_total,
     }))
 }
 
@@ -2052,6 +2059,75 @@ async fn run_generation_job(
     Ok(())
 }
 
+async fn run_generation_batch(
+    state: AppState,
+    job_id: Uuid,
+    model: ModelInfo,
+    selected_loras: Vec<LoraInfo>,
+    prompt_interpreter_model: Option<ModelInfo>,
+    request: GenerateRequest,
+    reference_asset: Option<InputAsset>,
+    end_reference_asset: Option<InputAsset>,
+    control_reference_asset: Option<InputAsset>,
+    first_seed: u32,
+) -> Result<()> {
+    let batch_total = request.normalized_batch_count();
+
+    for batch_index in 0..batch_total {
+        let mut run_request = request.clone();
+        run_request.batch_count = 1;
+        let seed = if batch_total == 1 {
+            first_seed
+        } else {
+            resolve_runtime_seed(None).map_err(|message| anyhow::anyhow!(message))?
+        };
+        run_request.settings.seed = Some(u64::from(seed));
+
+        if batch_total > 1 {
+            emit_progress(
+                &state,
+                job_id,
+                0.02,
+                "Batch Queue",
+                &format!(
+                    "Starting batch item {} of {} with a fresh random seed.",
+                    batch_index + 1,
+                    batch_total
+                ),
+            );
+        }
+
+        run_generation_job(
+            state.clone(),
+            job_id,
+            model.clone(),
+            selected_loras.clone(),
+            prompt_interpreter_model.clone(),
+            run_request,
+            reference_asset.clone(),
+            end_reference_asset.clone(),
+            control_reference_asset.clone(),
+        )
+        .await?;
+
+        if batch_total > 1 && batch_index + 1 < batch_total {
+            emit_progress(
+                &state,
+                job_id,
+                0.98,
+                "Batch Saved",
+                &format!(
+                    "Finished batch item {} of {}. Preparing the next queued generation.",
+                    batch_index + 1,
+                    batch_total
+                ),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn emit_progress(state: &AppState, job_id: Uuid, percent: f32, phase: &str, message: &str) {
     let _ = state.events.send(ServerEvent::Progress {
         job_id,
@@ -3367,6 +3443,7 @@ mod tests {
         let request = crate::types::GenerateRequest {
             prompt: "cinematic city rain ambience".to_string(),
             negative_prompt: Some("distortion, clipping".to_string()),
+            batch_count: 1,
             prompt_assist: PromptAssistMode::Gentle,
             model: "stable-audio-open-1.0".to_string(),
             kind: MediaKind::Audio,
@@ -3434,6 +3511,7 @@ mod tests {
         let request = crate::types::GenerateRequest {
             prompt: "lush forest ambience, soft wind".to_string(),
             negative_prompt: Some("distortion".to_string()),
+            batch_count: 1,
             prompt_assist: PromptAssistMode::Off,
             model: "stable-audio-open-1.0".to_string(),
             kind: MediaKind::Audio,
@@ -3480,6 +3558,7 @@ mod tests {
         let request = crate::types::GenerateRequest {
             prompt: "a lighthouse on a cliff".to_string(),
             negative_prompt: Some("blurry".to_string()),
+            batch_count: 1,
             prompt_assist: PromptAssistMode::Off,
             model: "stable-diffusion-v1-5".to_string(),
             kind: MediaKind::Image,

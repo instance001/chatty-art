@@ -2669,6 +2669,7 @@ mod tests {
         GenerateRequest {
             prompt: "a cat in a hat".to_string(),
             negative_prompt: negative_prompt.map(str::to_string),
+            batch_count: 1,
             prompt_assist: PromptAssistMode::Off,
             model: "test.gguf".to_string(),
             kind: MediaKind::Image,

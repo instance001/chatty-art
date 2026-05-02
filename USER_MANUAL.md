@@ -681,6 +681,8 @@ Once the page opens:
    - If you picked a realism audio model, you can also fill in the extra `Words / Script` or `Words / Sounds` box.
 4. Pick a model from the dropdown.
 5. Leave the default settings alone for your first test.
+   - If you want repeated variations, raise `Sequential Batch Count`.
+   - Chatty-art will then run the same job one generation at a time, end to end.
 6. Click one button:
    - `Generate Image`
    - `Generate GIF`
@@ -1083,6 +1085,8 @@ For realism speech models, the tray can also show:
 - `Use as Voice Reference`
   Choose an audio clip from either `Input Folder` or `Output Folder`, then assign it as the voice reference.
   Chatty-art will hand that audio file to `OuteTTS` as the cloning reference for the generated speech.
+  Short `.wav` clips work best.
+  Keep voice-reference clips at `20 seconds or less`, and ideally around `15 seconds or under`.
 
 In `Advanced`, the literal box can expand into a sequence builder:
 
@@ -1143,13 +1147,15 @@ Good beginner example with cloning:
 - `Words / Script`
   `The local generation run is complete.`
 - `Voice Reference`
-  `short prerecorded voice clip from the tray`
+  `short prerecorded WAV voice clip from the tray`
 
 Simple advice:
 
 - Put the exact spoken sentence in `Words / Script`
 - Put voice, tone, speed, mood, and delivery notes in `Prompt`
 - Put the speaker you want copied in `Voice Reference`
+- Use a short `.wav` clip when possible
+- Keep the cloning clip at `20 seconds or less`, and ideally around `15 seconds or under`
 - Use `Negative Prompt` for things like robotic delivery, harsh sibilance, mumbling, noisy background, or clipping
 
 In `Advanced` mode:
@@ -1431,6 +1437,29 @@ This is the repeatability number.
 
 Use a seed when you want to keep a version you like and reproduce it later.
 
+### Sequential Batch Count
+
+This tells Chatty-art to repeat the same generation setup multiple times in a row.
+
+- Same prompt
+- Same model
+- Same settings
+- Same references
+- Same LoRA stack
+- One full generation at a time from start to finish
+
+Plain-language meaning:
+
+- `1` = normal single generate
+- `2` or more = Chatty-art keeps going automatically until it has finished that many separate runs
+- each extra run behaves like clearing the seed box and pressing `Generate` again
+
+Important:
+
+- this is sequential only, not parallel
+- Chatty-art does not try to run the whole batch at once
+- when `Sequential Batch Count` is greater than `1`, the manual `Seed` box is ignored and each run gets a fresh random seed
+
 ## Using reference files
 
 If you want to use an existing file during generation:
@@ -1469,6 +1498,7 @@ Important:
 - `Expressive` mode can use the selected file as a guide or edit/source cue during planning.
 - `Realism` mode uses tray-selected still images for guide/edit workflows, including files from `input/` and previously generated output images.
 - `Realism` speech models like `OuteTTS` can use tray-selected audio files as a `Voice Reference`.
+- Short `.wav` clips work best for `Voice Reference`, and OuteTTS expects the cloning clip to be `20 seconds or less`.
 - Some realism video families can also use:
   - `Set as End Frame`
   - `Use as Control Video`

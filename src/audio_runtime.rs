@@ -1629,6 +1629,7 @@ mod tests {
         let request = GenerateRequest {
             prompt: "rainy city alley, neon reflections".to_string(),
             negative_prompt: None,
+            batch_count: 1,
             prompt_assist: PromptAssistMode::Off,
             model: "stable-audio-open-1.0".to_string(),
             kind: MediaKind::Audio,

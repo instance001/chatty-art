@@ -15,6 +15,7 @@ Chatty-art is a simple local image/GIF/video/audio generator with:
 - Optional reference media selection from both `input/` and previously generated files in `outputs/`
 - Input Tray `Use as Guide` / `Edit Selected` controls for reference-driven runs
 - Separate `Generate GIF` and `Generate Video` paths with video resolution, duration, and FPS controls
+- `Sequential Batch Count` for repeating the same job one generation at a time with a fresh random seed on each run
 - `Low VRAM Mode` for safer realism jobs on tighter GPUs
 - Live `ECG Window` under the progress area on Windows, similar to Task Manager
 - Model-aware `Recommended Limits On This Hardware` guidance in the UI
@@ -203,6 +204,8 @@ For realism speech models, the Input Tray can also show:
 - `Use as Voice Reference`
   Choose an audio clip from either `Input Folder` or `Output Folder`, then assign it as the voice reference.
   Chatty-art will hand that audio file to `OuteTTS` as the cloning reference for the generated speech.
+  Short `.wav` clips work best.
+  Keep voice-reference clips at `20 seconds or less`, and ideally around `15 seconds or under`.
 
 In `Advanced`, audio models can expand that literal lane into a sequence builder:
 
@@ -244,7 +247,7 @@ Example speech setup with cloning:
 - `Words / Script`
   `The local generation run is complete.`
 - `Voice Reference`
-  `short prerecorded voice clip from the tray`
+  `short prerecorded WAV voice clip from the tray`
 
 Example soundscape setup:
 
@@ -492,6 +495,7 @@ The app opens at `http://127.0.0.1:7878`.
 - The Input Tray now shows both `Input Folder` files and `Output Folder` files so you can reuse generated material without moving it by hand.
 - The Input Tray lets you choose whether the selected file should be used as a `Guide` or treated as the image to `Edit`.
 - For realism speech models, the Input Tray also lets you assign an audio clip as `Voice Reference`.
+- Short `.wav` clips work best for `Voice Reference`, and OuteTTS expects the cloning clip to be `20 seconds or less`.
 - The dashboard columns can be collapsed with `Hide` and restored from the bottom-right dock as `Controls`, `Outputs`, and `Input Tray`.
 - In realism mode, still-image references can be selected from the tray, including files from `input/` or previously generated output images.
 - Realism audio uses specialist backends alongside the realism visual lane:
@@ -511,7 +515,9 @@ The app opens at `http://127.0.0.1:7878`.
 - For realism audio models, the `Words / Script` or `Words / Sounds` field is the best place for verbatim content.
 - For realism speech models, `Voice Reference` stays separate from Prompt Assist and is passed through as the cloning clip.
 - `Generate GIF` and `Generate Video` are separate on purpose. GIF is usually the easier preview/share format, while true local video depends on the selected realism family.
+- `Sequential Batch Count` reruns the same prompt, settings, references, and LoRA stack one job at a time. Each extra run behaves like clearing the seed box and pressing Generate again.
 - GIF/video settings include clip resolution, duration, and FPS.
+- When `Sequential Batch Count` is greater than `1`, Chatty-art rolls a fresh random seed for each run instead of reusing a manual seed.
 - `Low VRAM Mode` uses a safer realism launch profile that spills more work to CPU and tiles VAE decode when needed.
 - The UI now shows `Recommended Limits On This Hardware` based on the selected model, output kind, detected GPU, and whether `Low VRAM Mode` is on.
 - On Windows, the progress area includes a small `ECG Window` that shows the busiest local GPU engine as an ECG-style activity line, similar to the Task Manager graph.

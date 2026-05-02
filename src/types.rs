@@ -279,6 +279,8 @@ pub struct GenerateRequest {
     pub prompt: String,
     #[serde(default)]
     pub negative_prompt: Option<String>,
+    #[serde(default = "default_batch_count")]
+    pub batch_count: u32,
     #[serde(default)]
     pub selected_lora: Option<String>,
     #[serde(default)]
@@ -320,6 +322,10 @@ pub struct GenerateRequest {
     pub manual_assumptions: Vec<String>,
 }
 
+fn default_batch_count() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoraSelection {
     pub id: String,
@@ -359,6 +365,10 @@ impl AudioPromptSegment {
 }
 
 impl GenerateRequest {
+    pub fn normalized_batch_count(&self) -> u32 {
+        self.batch_count.clamp(1, 64)
+    }
+
     pub fn normalized_audio_segments(&self) -> Vec<AudioPromptSegment> {
         self.audio_segments
             .iter()
@@ -451,7 +461,10 @@ impl GenerateRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateAccepted {
     pub job_id: Uuid,
-    pub used_seed: u64,
+    #[serde(default)]
+    pub used_seed: Option<u64>,
+    #[serde(default = "default_batch_count")]
+    pub batch_total: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

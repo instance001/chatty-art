@@ -13,6 +13,8 @@ const state = {
   referenceIntent: "guide",
   currentPreview: null,
   currentJobId: null,
+  currentBatchTotal: 1,
+  currentBatchCompleted: 0,
   activeFilter: "all",
   generating: false,
   preparing: false,
@@ -136,6 +138,8 @@ const elements = {
   lowVramInput: document.getElementById("lowVramInput"),
   lowVramCopy: document.getElementById("lowVramCopy"),
   promptAssistInput: document.getElementById("promptAssistInput"),
+  batchCountInput: document.getElementById("batchCountInput"),
+  batchCountCopy: document.getElementById("batchCountCopy"),
   seedInput: document.getElementById("seedInput"),
   refreshAll: document.getElementById("refreshAll"),
   progressFill: document.getElementById("progressFill"),
@@ -216,6 +220,10 @@ elements.toggleTray.addEventListener("click", () => toggleTray(false));
 elements.showLeftColumn.addEventListener("click", () => toggleColumn("left", true));
 elements.showCenterColumn.addEventListener("click", () => toggleColumn("center", true));
 elements.showTray.addEventListener("click", () => toggleTray(true));
+elements.batchCountInput.addEventListener("input", () => {
+  refreshBatchCountCopy();
+  clearPreparedHandoff();
+});
 elements.addLoraButton.addEventListener("click", () => {
   addLoraSelection();
   renderAdvancedRealismSettings();
@@ -227,6 +235,7 @@ elements.modelSelect.addEventListener("change", () => {
   renderPrepareKindOptions();
   renderModelSummary();
   refreshAudioSettingCopy();
+  refreshBatchCountCopy();
   renderReferenceIntentControls();
   syncActionState();
 });
@@ -251,6 +260,7 @@ elements.styleButtons.forEach((button) => {
     clearPreparedHandoff();
     renderStyleMode();
     renderModels();
+    refreshBatchCountCopy();
     renderReferenceIntentControls();
     syncActionState();
   });
@@ -264,6 +274,7 @@ elements.workflowButtons.forEach((button) => {
 
     state.workflowMode = nextMode;
     renderPromptWorkflowMode();
+    refreshBatchCountCopy();
     syncActionState();
   });
 });
@@ -271,6 +282,7 @@ elements.workflowButtons.forEach((button) => {
 function handleTrackedSettingMutation() {
   state.lastAutoDefaultsStyle = null;
   refreshVideoSettingCopy();
+  refreshBatchCountCopy();
   clearPreparedHandoff();
   renderAdvancedRealismSettings();
   renderModelSummary();
@@ -289,7 +301,10 @@ elements.audioLiteralPromptInput.addEventListener("input", () => clearPreparedHa
 elements.manualFocusCuesInput.addEventListener("input", () => clearPreparedHandoff());
 elements.manualAssumptionsInput.addEventListener("input", () => clearPreparedHandoff());
 elements.promptAssistInput.addEventListener("change", () => clearPreparedHandoff());
-elements.prepareKindInput.addEventListener("change", () => clearPreparedHandoff());
+elements.prepareKindInput.addEventListener("change", () => {
+  clearPreparedHandoff();
+  refreshBatchCountCopy();
+});
 elements.addAudioSegmentButton.addEventListener("click", () => {
   const model = getSelectedModel();
   if (!isAdvancedAudioSegmentsEnabled(model)) {
@@ -361,6 +376,7 @@ renderStyleMode();
 renderPromptWorkflowMode();
 renderPrepareKindOptions();
 renderPreparedHandoff();
+refreshBatchCountCopy();
 refreshEverything();
 startGpuTelemetryPolling();
 
@@ -392,6 +408,7 @@ async function loadHardwareProfile() {
     state.hardwareProfile = null;
   }
 
+  refreshBatchCountCopy();
   renderModelSummary();
 }
 
@@ -2109,7 +2126,7 @@ function primaryReferenceEmptyDetail(model = getSelectedModel()) {
 
 function primaryReferenceFilledDetail(model = getSelectedModel()) {
   return isSpeechVoiceReferenceModel(model)
-    ? "Used to clone the speaker voice for realism speech generation."
+    ? "Used to clone the speaker voice for realism speech generation. Short WAV clips work best; keep them under 20 seconds."
     : `${referenceIntentLabel(state.referenceIntent)}`;
 }
 
@@ -2161,7 +2178,7 @@ function getReferenceAssignmentContext() {
         editEnabled: false,
         endEnabled: false,
         controlEnabled: false,
-        message: "Choose an audio file first. Voice Reference assigns a prerecorded clip for speech cloning.",
+        message: "Choose an audio file first. Voice Reference assigns a prerecorded clip for speech cloning. Short WAV clips work best, and OuteTTS expects 20 seconds or less.",
       };
     }
 
@@ -2216,8 +2233,8 @@ function getReferenceAssignmentContext() {
       endEnabled: false,
       controlEnabled: false,
       message: asset.kind === "audio"
-        ? "Assign this audio file as the voice reference for realism speech generation."
-        : "Speech voice cloning uses an audio file from the tray as the voice reference.",
+        ? "Assign this audio file as the voice reference for realism speech generation. Short WAV clips work best, and OuteTTS expects 20 seconds or less."
+        : "Speech voice cloning uses an audio file from the tray as the voice reference. Short WAV clips work best, and OuteTTS expects 20 seconds or less.",
     };
   }
 
@@ -2574,7 +2591,7 @@ function syncActionState() {
   });
 }
 
-function buildAcceptedMessage(model, kind) {
+function buildAcceptedMessage(model, kind, batchTotal = 1) {
   const assistMode = elements.promptAssistInput.value;
   const usingPreparedHandoff = state.preparedHandoff && state.preparedHandoff.kind === kind;
   const assistNote = usingPreparedHandoff
@@ -2583,18 +2600,21 @@ function buildAcceptedMessage(model, kind) {
     ? ""
     : ` Prompt Assist (${assistMode}) will compile a richer local brief first.`;
   const kindLabel = formatKind(kind).toLowerCase();
+  const batchNote = batchTotal > 1
+    ? ` Sequential batch mode will run ${batchTotal} end-to-end generations with a fresh random seed each time.`
+    : "";
 
   if (state.generationStyle === "realism") {
-    return `Job accepted. Starting the local realism pipeline for ${kindLabel}. The first realism run can take longer while stable-diffusion.cpp gets ready.${assistNote}`;
+    return `Job accepted. Starting the local realism pipeline for ${kindLabel}. The first realism run can take longer while stable-diffusion.cpp gets ready.${batchNote}${assistNote}`;
   }
 
   const largePlanner =
     /\b(14b|20b|22b|32b|70b)\b/i.test(model.name) || /\b(gpt-oss|qwq)\b/i.test(model.name);
   if (largePlanner) {
-    return `Job accepted. Starting local planning with ${model.name} for ${kindLabel}. Bigger GGUFs can spend a few minutes planning before rendering begins.${assistNote}`;
+    return `Job accepted. Starting local planning with ${model.name} for ${kindLabel}. Bigger GGUFs can spend a few minutes planning before rendering begins.${batchNote}${assistNote}`;
   }
 
-  return `Job accepted. Starting local planning for ${kindLabel}. The first progress update may take a few seconds.${assistNote}`;
+  return `Job accepted. Starting local planning for ${kindLabel}. The first progress update may take a few seconds.${batchNote}${assistNote}`;
 }
 
 function clearPreparedHandoff() {
@@ -2727,6 +2747,7 @@ function buildBasePayload(kind) {
   const prompt = elements.promptInput.value.trim();
   const negativePrompt = elements.negativePromptInput.value.trim();
   const audioLiteralPrompt = elements.audioLiteralPromptInput.value.trim();
+  const batchCount = parseBatchCountInput();
   const includeAudioLiteral =
     kind === "audio"
     && model
@@ -2740,6 +2761,7 @@ function buildBasePayload(kind) {
   return {
     prompt,
     negative_prompt: negativePrompt ? negativePrompt : null,
+    batch_count: batchCount,
     audio_literal_prompt:
       includeAudioLiteral && !audioSegments.length && audioLiteralPrompt ? audioLiteralPrompt : null,
     audio_segments: audioSegments,
@@ -2785,6 +2807,33 @@ function parsePromptListInput(value) {
     .split(/[\n,|]+/)
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function parseBatchCountInput() {
+  const numeric = Number(elements.batchCountInput.value);
+  if (!Number.isFinite(numeric)) {
+    return 1;
+  }
+  return Math.min(64, Math.max(1, Math.round(numeric)));
+}
+
+function refreshBatchCountCopy() {
+  const batchCount = parseBatchCountInput();
+  const model = getSelectedModel();
+  const kind = elements.prepareKindInput.value || "image";
+  const kindLabel = formatKind(kind).toLowerCase();
+  const selectedLoras = getNormalizedLoraSelections().length;
+  const loraNote = selectedLoras > 0
+    ? ` The current LoRA stack will be reused on every run.`
+    : "";
+
+  if (batchCount <= 1) {
+    elements.batchCountCopy.textContent = `A count of 1 behaves like a normal single ${kindLabel} run.${loraNote}`;
+    return;
+  }
+
+  const modelNote = model ? ` using ${model.name}` : "";
+  elements.batchCountCopy.textContent = `This will run ${batchCount} ${kindLabel} generation${batchCount === 1 ? "" : "s"} one after another${modelNote}. Prompt, settings, references, and LoRA stack stay the same. Each run gets a fresh random seed, like clearing the seed box and pressing Generate again.${loraNote}`;
 }
 
 async function prepareGenerationRequest() {
@@ -2879,6 +2928,7 @@ async function submitGeneration(kind) {
 
   const prompt = elements.promptInput.value.trim();
   const audioLiteralPrompt = elements.audioLiteralPromptInput.value.trim();
+  const batchCount = parseBatchCountInput();
   const canUseAudioLiteral = model.backend === "audio_runtime" && kind === "audio";
   const audioSegments = canUseAudioLiteral && state.workflowMode === "advanced"
     ? getNormalizedAudioSegments()
@@ -2904,14 +2954,16 @@ async function submitGeneration(kind) {
   );
 
   let seed = null;
-  try {
-    seed = parseSeedInput();
-  } catch (error) {
-    state.generating = false;
-    syncActionState();
-    setProgress(0, "Seed", error.message);
-    elements.seedInput.focus();
-    return;
+  if (batchCount === 1) {
+    try {
+      seed = parseSeedInput();
+    } catch (error) {
+      state.generating = false;
+      syncActionState();
+      setProgress(0, "Seed", error.message);
+      elements.seedInput.focus();
+      return;
+    }
   }
 
   const payload = buildBasePayload(kind);
@@ -2941,12 +2993,16 @@ async function submitGeneration(kind) {
 
     const accepted = await response.json();
     state.currentJobId = accepted.job_id;
+    state.currentBatchTotal = Number(accepted.batch_total || batchCount || 1);
+    state.currentBatchCompleted = 0;
     if (accepted.used_seed !== undefined && accepted.used_seed !== null) {
       elements.seedInput.value = String(accepted.used_seed);
     }
-    setProgress(0.08, "Starting", buildAcceptedMessage(model, kind));
+    setProgress(0.08, "Starting", buildAcceptedMessage(model, kind, state.currentBatchTotal));
   } catch (error) {
     state.generating = false;
+    state.currentBatchTotal = 1;
+    state.currentBatchCompleted = 0;
     syncActionState();
     setProgress(0, "Error", error.message || "Generation request failed.");
   }
@@ -2979,10 +3035,21 @@ function handleServerEvent(event) {
     renderHistory();
 
     if (event.job_id === state.currentJobId) {
-      state.generating = false;
-      state.currentJobId = null;
-      syncActionState();
-      setProgress(1, "Complete", `${formatKind(event.output.kind)} saved to outputs/.`);
+      state.currentBatchCompleted += 1;
+      if (state.currentBatchCompleted >= state.currentBatchTotal) {
+        state.generating = false;
+        state.currentJobId = null;
+        state.currentBatchTotal = 1;
+        state.currentBatchCompleted = 0;
+        syncActionState();
+        setProgress(1, "Complete", `${formatKind(event.output.kind)} batch finished and saved to outputs/.`);
+      } else {
+        setProgress(
+          Math.min(0.99, state.currentBatchCompleted / state.currentBatchTotal),
+          "Batch Progress",
+          `${formatKind(event.output.kind)} ${state.currentBatchCompleted} of ${state.currentBatchTotal} saved. The next batch item is starting with a fresh random seed.`
+        );
+      }
     }
     return;
   }
@@ -2990,6 +3057,8 @@ function handleServerEvent(event) {
   if (event.type === "error" && event.job_id === state.currentJobId) {
     state.generating = false;
     state.currentJobId = null;
+    state.currentBatchTotal = 1;
+    state.currentBatchCompleted = 0;
     syncActionState();
     setProgress(0, "Error", event.message || "Generation failed.");
   }
