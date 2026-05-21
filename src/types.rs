@@ -303,6 +303,10 @@ pub struct GenerateRequest {
     #[serde(default)]
     pub control_reference_asset: Option<String>,
     #[serde(default)]
+    pub selected_prompt_model: Option<String>,
+    #[serde(default)]
+    pub selected_vision_model: Option<String>,
+    #[serde(default)]
     pub prepared_prompt: Option<String>,
     #[serde(default)]
     pub prepared_negative_prompt: Option<String>,
@@ -320,6 +324,12 @@ pub struct GenerateRequest {
     pub manual_focus_tags: Vec<String>,
     #[serde(default)]
     pub manual_assumptions: Vec<String>,
+    #[serde(default)]
+    pub manual_preserve_items: Vec<String>,
+    #[serde(default)]
+    pub manual_change_targets: Vec<String>,
+    #[serde(default)]
+    pub manual_avoid_items: Vec<String>,
 }
 
 fn default_batch_count() -> u32 {
@@ -467,6 +477,17 @@ pub struct GenerateAccepted {
     pub batch_total: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelRequest {
+    pub job_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelAccepted {
+    pub job_id: Uuid,
+    pub accepted: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EstimateConfidence {
@@ -495,6 +516,12 @@ pub struct PrepareResponse {
     pub effective_negative_prompt: Option<String>,
     pub prompt_assist: PromptAssistMode,
     pub interpreter_model: Option<String>,
+    #[serde(default)]
+    pub vision_model: Option<String>,
+    #[serde(default)]
+    pub vision_summary: Option<String>,
+    #[serde(default)]
+    pub vision_error: Option<String>,
     pub note: String,
     pub assumptions: Vec<String>,
     pub focus_tags: Vec<String>,
@@ -601,6 +628,7 @@ impl InputAsset {
 pub struct ReferenceSummary {
     pub name: String,
     pub relative_path: String,
+    pub source: AssetSource,
     pub kind: MediaKind,
     pub palette: Vec<String>,
     pub intent: ReferenceIntent,
@@ -664,6 +692,10 @@ pub enum ServerEvent {
     Completed {
         job_id: Uuid,
         output: OutputEntry,
+    },
+    Canceled {
+        job_id: Uuid,
+        message: String,
     },
     Error {
         job_id: Uuid,

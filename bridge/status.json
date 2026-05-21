@@ -1,0 +1,47 @@
+{
+  "module_id": "chatty_art",
+  "summary": "Chatty-art is idle after saving Image - 20260508-010801-image-wan2-1-v5-vace-1-3b-q4-0-3322599805.png. Model: wan2.1-v5-vace-1.3b-q4_0. Prompt is still empty. References: 20260504-064738-image-wan2-2-ti2v-5b-q8-0-3885789766.png (Use as guide). Latest output: Image - 20260508-010801-image-wan2-1-v5-vace-1-3b-q4-0-3322599805.png.",
+  "snapshot": "# Chatty-art Snapshot\n\n- Generation style: realism\n- Workflow mode: advanced\n- Current phase: Idle\n- Current status: Select a model, type a prompt, and generate something.\n- Selected model: wan2.1-v5-vace-1.3b-q4_0\n- Prompt assist: gentle\n- Seed: (random)\n- Prepared handoff: none\n- Prompt: (empty)\n- Audio words/sounds: (empty)\n- Negative prompt: (empty)\n- Manual focus cues: (empty)\n- Selected references: 20260504-064738-image-wan2-2-ti2v-5b-q8-0-3885789766.png (Use as guide)\n- Current output count: 13\n- Latest output: Image - 20260508-010801-image-wan2-1-v5-vace-1-3b-q4-0-3322599805.png",
+  "event_type": "suspend_rundown",
+  "tags": [
+    "generation",
+    "media",
+    "prompt",
+    "reference",
+    "output",
+    "webview"
+  ],
+  "payload": {
+    "activity_hint": "Host is adjusting media settings",
+    "audio_prompt": null,
+    "canceling": false,
+    "current_batch_completed": 0,
+    "current_batch_total": 1,
+    "current_job_id": null,
+    "generating": false,
+    "generation_style": "realism",
+    "latest_output": {
+      "file_name": "20260508-010801-image-wan2-1-v5-vace-1-3b-q4-0-3322599805.png",
+      "id": "20260508-010801-image-wan2-1-v5-vace-1-3b-q4-0-3322599805",
+      "kind": "image",
+      "model": "wan2.1-v5-vace-1.3b-q4_0",
+      "url": "/outputs/image/20260508-010801-image-wan2-1-v5-vace-1-3b-q4-0-3322599805.png"
+    },
+    "negative_prompt": null,
+    "output_count": 13,
+    "prepared_handoff_kind": null,
+    "preparing": false,
+    "prompt": null,
+    "references": {
+      "control": null,
+      "end": null,
+      "primary": "20260504-064738-image-wan2-2-ti2v-5b-q8-0-3885789766.png",
+      "primary_intent": "guide"
+    },
+    "selected_model_backend": "stable_diffusion_cpp",
+    "selected_model_id": "wan2.1-v5-vace-1.3b-q4_0.gguf",
+    "selected_model_name": "wan2.1-v5-vace-1.3b-q4_0",
+    "workflow_mode": "advanced"
+  },
+  "updated_at_unix_ms": 1779329181595
+}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023-2024 The ggml authors
+ * Copyright (c) 2023-2026 The ggml authors
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
@@ -277,7 +277,7 @@ struct ggml_graph_node_properties {
             }
         }
 
-        if (node->op == GGML_OP_SCALE || node->op == GGML_OP_UNARY || node->op == GGML_OP_GLU) {
+        if (node->op == GGML_OP_SCALE || node->op == GGML_OP_UNARY || node->op == GGML_OP_GLU || node->op == GGML_OP_ROPE){
             return memcmp(this->op_params, node->op_params, GGML_MAX_OP_PARAMS) == 0;
         }
         return true;

@@ -1,60 +1,126 @@
-# stable-ui 🔥
+# sdcpp-webui
 
-This UI is integrated into the **stable-diffusion.cpp project** and adapted for use within this application.
+A lightweight Vue + Vite web UI for `stable-diffusion.cpp` servers that expose the native `sdcpp` API.
 
-The interface is based on **stable-ui**, which was originally developed as a front-end for the **AI Horde**, and later adapted for local generation APIs.
+It is designed for two use cases:
 
+- run as a standalone frontend during local development
+- build into a single HTML file that can be embedded into `sd-server`
 
-<p align="center">
-  <img src="https://github.com/aqualxx/stable-ui/blob/main/doc/generate_showcase.png" style="width: 100%" />
-</p>
+## What It Does
 
-<p align="center">
-  <img src="https://github.com/aqualxx/stable-ui/blob/main/doc/images_showcase.png" style="width: 100%"/>
-</p>
+`sdcpp-webui` talks directly to the native server endpoints:
 
-## Features
+- `GET /sdcpp/v1/capabilities`
+- `POST /sdcpp/v1/img_gen`
+- `POST /sdcpp/v1/vid_gen`
+- `GET /sdcpp/v1/jobs/:id`
+- `POST /sdcpp/v1/jobs/:id/cancel`
 
-* Tons of customizable settings
-  * Support for Text2Img, Img2Img, and Inpainting
-  * Adjust settings for resolution, batch size
-  * All models supported by stable-diffusion.cpp, including SD1.5, SDXL, Flux, Qwen Image, WAN, Z-Image and many more.
-* A gallery to view all generated images
-  * Favourite, download, delete, and share images
-  * Reuse image settings for Text2Img or send back an image for Img2Img or inpainting
-  * Use batch selection to perform actions on multiple images at a time
-  * Store images locally through the browser
-* Optimized designs for both desktop and mobile devices
+The current UI supports:
 
-## Contributing
+- image generation and video generation mode switching
+- prompt and negative prompt editing
+- width, height, seed, batch count, video frames, and fps
+- sampler and scheduler selection
+- guidance controls, including the video high-noise stage
+- conditioning controls such as `clip_skip`, `strength`, `control_strength`, `moe_boundary`, and `vace_strength`
+- LoRA selection from server capabilities
+- init image, end image, mask image, control image, control frames, and reference images
+- VAE tiling controls
+- cache controls
+- job polling, cancellation, image preview, and video or animated WebP preview
 
-Feel free to contribute! Pull requests are welcome.
+## Requirements
 
-## Special Thanks To
+- Node.js `>= 20`
+- `pnpm` `>= 10`
+- a running `stable-diffusion.cpp` server with the `sdcpp` API enabled
 
-| Library | Description |
-| :------ | :---------- |
-| [Vue 3](https://vuejs.org/)                  | An amazing Javascript framework |
-| [Pinia](https://pinia.vuejs.org/)            | For creating Vue stores |
-| [Element Plus](https://element-plus.org/)    | Beautiful Vue 3 components |
-| [VueUse](https://vueuse.org/)                | Tons of useful hooks |
-| [XIcons](https://github.com/07akioni/xicons) | An extensive library of icons |
-| [Original Stable UI](https://aqualxx.github.io/stable-ui/) | Original Stable UI project this was forked from |
+## Development
 
-## Credits
+Install dependencies:
 
-This UI is derived from the open-source **stable-ui** project and its forks:
+```bash
+pnpm install
+```
 
-* [https://github.com/LostRuins/stable-ui](https://github.com/LostRuins/stable-ui)
-* [https://github.com/henk717/stable-ui](https://github.com/henk717/stable-ui)
-* [https://github.com/ayunami2000/stable-ui](https://github.com/ayunami2000/stable-ui)
+Start the dev server:
 
-The original project was created for **AI Horde** by:
-[https://github.com/aqualxx/stable-ui](https://github.com/aqualxx/stable-ui)
-(Original author: aqualxx)
+```bash
+pnpm dev
+```
 
-We thank all contributors who helped develop and maintain the project.
+Then open the Vite URL shown in the terminal.
+
+The UI lets you set the backend base URL in the Settings tab.  
+If left empty, requests go to the current origin.
+
+## Production Build
+
+Build a production bundle:
+
+```bash
+pnpm build
+```
+
+This project uses `vite-plugin-singlefile`, so the output is emitted as a self-contained `dist/index.html`.
+
+Preview the production build locally:
+
+```bash
+pnpm preview
+```
+
+## Embedding Into `sd-server`
+
+If you want to ship the UI inside `stable-diffusion.cpp`, first build the frontend:
+
+```bash
+pnpm build
+```
+
+Then generate the C header:
+
+```bash
+pnpm build:header
+```
+
+That produces:
+
+```text
+dist/gen_index_html.h
+```
+
+The generated header contains the built HTML as a byte array, which can be compiled into the server binary.
+
+## Type Checking
+
+Run:
+
+```bash
+pnpm type-check
+```
+
+## Project Layout
+
+```text
+src/
+  components/   reusable UI pieces
+  lib/          API, form mapping, image helpers, settings helpers
+  App.vue       main application shell
+  main.ts       app entry
+  styles.css    global styles
+scripts/
+  build_gen_index_html.js
+```
+
+## Notes
+
+- This UI is intentionally thin. Most selectable options come from the server's `capabilities` response.
+- It assumes the backend handles CORS correctly if the frontend is served from a different origin.
+- It is scoped to the native `sdcpp` API, not the OpenAI-compatible routes and not the A1111-compatible `sdapi` routes.
 
 ## License
 
-[MIT License](https://github.com/graphql-python/gql/blob/master/LICENSE)
+MIT License

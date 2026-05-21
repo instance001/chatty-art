@@ -9,6 +9,10 @@ You do not need to know Rust, coding, or machine learning terms to use Chatty-ar
 3. Type what you want.
 4. Click a button.
 
+Chatty-art is a standalone local tool first, but it is also ChattyCog-compatible.
+
+(Drop me in ChattyCog's `modules/` folder!)
+
 ## What Chatty-art does
 
 Chatty-art is a local media generator.
@@ -224,7 +228,7 @@ git clone --recurse-submodules https://github.com/leejet/stable-diffusion.cpp di
 What not to add yet:
 
 - `FLUX` unless you also want to manage its extra `ae`, `clip_l`, and `t5xxl` files
-- `Wan2.2` paired video models
+- mixed-source `Wan2.2` paired downloads where the low-noise and high-noise files do not clearly belong together
 - random `SD3` or `SD3.5` merge GGUFs from pages that do not clearly list the required helper files
 - duplicate downloads of the same file with `(1)` in the name
 
@@ -277,9 +281,60 @@ Why this is a good next step:
 
 Important note:
 
-- We are still testing which smaller Wan video conversion is the best beginner recommendation for Chatty-art.
-- Until that is pinned down, the current known-good video recommendation stays `Wan2.1 T2V 14B` from the starter stack.
-- If you see older notes elsewhere in this manual mentioning `Wan2.1 VACE 1.3B` as the default next step, treat that as experimental rather than the current recommended download.
+- The current easiest plain local video recommendation remains `Wan2.1 T2V 14B` from the starter stack.
+- `Wan2.2 TI2V 5B` is the simpler later hybrid lane if you want a newer Wan path.
+- The paired `Wan2.2 A14B` routes are heavier and easier to mismatch, so stage them more carefully.
+
+## Later Wan2.2 hybrid lane
+
+If you want a newer Wan2.2 path after the starter stack is already behaving well, the cleaner next lane is:
+
+1. `Wan2.2-TI2V-5B-Q4_K_M.gguf`
+2. `Wan2.2_VAE.safetensors`
+3. `umt5-xxl-encoder-Q4_K_M.gguf`
+
+Suggested links:
+
+1. `Wan2.2-TI2V-5B-Q4_K_M.gguf`
+   - Model page:
+     https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF
+
+2. `Wan2.2_VAE.safetensors`
+   - File page:
+     https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF/blob/main/VAE/Wan2.2_VAE.safetensors
+
+3. `umt5-xxl-encoder-Q4_K_M.gguf`
+   - Model page:
+     https://huggingface.co/city96/umt5-xxl-encoder-gguf
+   - Direct file:
+     https://huggingface.co/city96/umt5-xxl-encoder-gguf/resolve/main/umt5-xxl-encoder-Q4_K_M.gguf
+
+Important:
+
+- `Wan2.2-TI2V-5B` is the simpler Wan2.2 hybrid lane in Chatty-art.
+- One main GGUF can handle both text-to-video and image-to-video.
+- It prefers `Wan2.2_VAE.safetensors`.
+- It still needs a `umt5` or `t5xxl` encoder companion file.
+- It is not the same thing as the paired Wan2.2 A14B high-noise / low-noise setups.
+
+## Heavier Wan2.2 A14B lane
+
+If you want to add the full paired Wan2.2 route after the simpler `TI2V 5B` lane already makes sense, Chatty-art expects:
+
+1. one low-noise `Wan2.2-T2V-A14B` or `Wan2.2-I2V-A14B` GGUF
+2. the matching high-noise GGUF partner
+3. `Wan2.2_VAE.safetensors`
+4. `umt5-xxl-encoder-Q4_K_M.gguf` or another compatible `umt5` / `t5xxl`
+5. `clip_vision_h.safetensors` for `I2V` runs
+
+Plain-language meaning:
+
+- `T2V A14B` = paired text-to-video lane
+- `I2V A14B` = paired image-to-video lane
+- Chatty-art uses the low-noise GGUF as the main model and passes the high-noise GGUF as its companion diffusion model
+- keep both GGUFs from the same conversion family and use matching quant suffixes such as both `Q4_K_M` or both `Q5_K_M`
+- `Wan2.2 A14B` prefers `Wan2.2_VAE.safetensors`
+- `I2V A14B` also needs a tray image input and `clip_vision_h.safetensors`
 
 ## Audio downloads and where they go
 
@@ -409,7 +464,7 @@ This may become the better "middle ground" video option later, but we are not pi
 
 ### Advanced later-stage families
 
-- `Wan2.2` paired models
+- `Wan2.2` paired A14B models
 - larger `SD3` / `SD3.5` setups
 - heavier multi-part image families
 
@@ -595,6 +650,8 @@ Important:
 
 - `SD1.5` and `SD2.1` are self-contained image models.
 - `Wan2.1-T2V-14B` is not self-contained. It also needs `wan_2.1_vae.safetensors` and a `umt5` encoder.
+- `Wan2.2-TI2V-5B` is also not self-contained. It prefers `Wan2.2_VAE.safetensors` and still needs a `umt5` or `t5xxl` encoder.
+- `Wan2.2-T2V-A14B` and `Wan2.2-I2V-A14B` are heavier paired setups. They prefer `Wan2.2_VAE.safetensors`, still need a `umt5` or `t5xxl` encoder, and also expect a matching high-noise / low-noise pair.
 - `umt5-xxl-encoder` is a helper file, not a model you normally pick by itself.
 
 ### Middle-ground upgrades
@@ -637,7 +694,8 @@ Beginner advice:
 
 - start with `Wan2.1-T2V-14B`
 - add `Wan2.1-I2V-14B` later if you want image-to-video
-- leave `Wan2.2` for later, because paired-model setups are easier to mismatch
+- `Wan2.2-TI2V-5B` is the simpler Wan2.2 hybrid lane if you want a later upgrade
+- leave the paired `Wan2.2` A14B setups for later, because they are easier to mismatch
 
 ## Search tips that save time
 
@@ -688,6 +746,7 @@ Once the page opens:
    - `Generate GIF`
    - `Generate Video`
    - `Generate Audio`
+   - If you launched something by mistake or want to stop the remaining runs in a sequential batch, use `Cancel Run`.
 7. Watch the progress bar.
    - On Windows, you can also watch the small `ECG Window` under the progress area. It is meant to feel similar to the Task Manager GPU graph.
 8. When it finishes, the result appears in the preview area.
@@ -1304,6 +1363,120 @@ Prompt Assist still runs locally.
 
 It uses a local expressive `llama.cpp` model as an interpreter role before the main generation step.
 
+When Prompt Assist is working from a still-image reference, Chatty-art can also run `Vision Assist` first.
+
+This now applies to both:
+
+- `Expressive` image handoffs
+- `Realism` image handoffs
+
+Vision Assist is a local multimodal read of the selected reference image. It produces a structured summary for things like:
+
+- main subject
+- setting
+- composition
+- camera framing
+- lighting
+- key objects
+- what should be preserved
+- what looks safe to change
+
+That summary is then handed to Prompt Assist before the final prompt expansion step.
+
+The current proven base is still-image `Use as Guide` and `Edit Selected`.
+
+`Vision Assist Model` only appears when:
+
+- Prompt Assist is on
+- the selected tray file is a still image
+- the file is assigned as `Use as Guide` or `Edit Selected`
+
+Right now the most reliable local helpers are:
+
+- `Qwen2.5-VL-7B-Instruct` as the primary option
+- `LLaVA v1.5 7B` as the fallback option
+
+The `Auto` setting now prefers `Qwen2.5-VL-7B` first and falls back to `LLaVA`.
+
+For now, smaller or shakier helpers such as `Moondream` and lighter `Qwen2-VL` variants are not part of the surfaced recommended selector flow. They may come back later after more tuning.
+
+Current recommended download pairs:
+
+- `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf`
+- `mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf`
+- `llava-v1.5-7b-Q4_K_M.gguf`
+- `llava-v1.5-7b-mmproj-model-f16.gguf`
+
+Current model links:
+
+- `Qwen2.5-VL-7B-Instruct-GGUF`
+  https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/tree/main
+- `LLaVA v1.5 7B GGUF`
+  https://huggingface.co/QuantFactory/llava-v1.5-7b-GGUF/tree/main
+
+Handy search terms if those links move:
+
+- `ggml-org Qwen2.5-VL-7B-Instruct-GGUF Hugging Face`
+- `llava-v1.5-7b GGUF mmproj Hugging Face`
+
+Best results usually come from reference images with:
+
+- one clear subject
+- readable lighting
+- one obvious focal point instead of a very busy scene
+
+For `Edit Selected`, the most reliable handoff pattern is:
+
+1. say what must stay
+2. say the one exact thing to add or change
+3. say what must not happen
+
+In `Realism + Advanced`, use these boxes to split that instruction cleanly:
+
+- `Manual Keep / Preserve`
+- `Manual Change Targets`
+- `Manual Avoid`
+
+Example: add a new subject
+
+- Prompt:
+  `Keep the kookaburra intact on the branch. Add a small separate green tree frog sitting on the kookaburra's back like a rider.`
+- `Manual Keep / Preserve`:
+  `kookaburra, branch, background, overall pose`
+- `Manual Change Targets`:
+  `add small green tree frog rider on kookaburra's back`
+- `Manual Avoid`:
+  `merged bodies, single hybrid animal, frog replacing bird, extra limbs`
+
+Example: replace the subject
+
+- Prompt:
+  `Replace the kookaburra with a frog on the same branch in the same scene.`
+- `Manual Keep / Preserve`:
+  `branch, background, lighting, framing`
+- `Manual Change Targets`:
+  `replace kookaburra with frog`
+- `Manual Avoid`:
+  `bird remaining in frame, merged bird and frog, extra heads`
+
+Example: change the background only
+
+- Prompt:
+  `Keep the bird exactly as it is. Change the background to a rainy forest.`
+- `Manual Keep / Preserve`:
+  `bird, pose, branch, framing`
+- `Manual Change Targets`:
+  `rainy forest background`
+- `Manual Avoid`:
+  `bird changing species, extra animals, merged background and subject`
+
+Practical edit tips:
+
+- Prefer one main edit per run instead of stacking several big requests together.
+- If the model replaces instead of adding, include the word `separate`.
+- If the model keeps changing too much, strengthen `Manual Keep / Preserve` before making the prompt longer.
+- Put exact failure modes like `merged bodies` into `Manual Avoid` instead of hoping the model infers them.
+
 For realism speech models, Prompt Assist now separates spoken words from delivery direction.
 
 For realism sound models, Prompt Assist only expands the descriptive prompt and negative prompt.
@@ -1318,6 +1491,9 @@ For visual realism in `Advanced`, Prompt Assist also stays separate from your ma
 
 - `Manual Focus Cues` are your own extra visual steering phrases
 - `Manual Defaults / Assumptions` are your own explicit defaults
+- `Manual Keep / Preserve` pins exact things that should stay
+- `Manual Change Targets` pins exact things that should be added or changed
+- `Manual Avoid` pins exact failure modes or inventions to avoid
 
 Those boxes are useful when Prompt Assist does not quite give you the handoff you wanted.
 
@@ -1459,6 +1635,7 @@ Important:
 - this is sequential only, not parallel
 - Chatty-art does not try to run the whole batch at once
 - when `Sequential Batch Count` is greater than `1`, the manual `Seed` box is ignored and each run gets a fresh random seed
+- `Cancel Run` stops the current generation and also prevents the rest of the queued sequential batch from continuing
 
 ## Using reference files
 
@@ -1534,6 +1711,39 @@ Some runs also save extra sidecar files:
 - `*.compiler.json`
   Raw Prompt Assist compiler output for debugging
 
+## Hosted handoffs and local cleanup
+
+If Chatty-art is running inside ChattyCog as a hosted module, the `Recent Outputs` panel can also become a mediated handoff surface.
+
+What you may see there:
+- checkboxes on saved outputs
+- `Send Selected to Chatty-lora`
+- `Send Selected to ChattyCog Sandbox`
+- a small handoff preview that shows what metadata will travel with the copy
+- `Delete Selected`
+
+Important behavior:
+- handoff actions are copy-only
+- ChattyCog keeps the original output file in Chatty-art
+- handoff actions only appear for approved destinations that ChattyCog can currently detect
+- `Delete Selected` is local cleanup, not a handoff
+
+Current intended routes:
+- `Chatty-art -> Chatty-lora`
+  sends selected generated outputs into Chatty-lora's `dataset_candidates` lane so they can be imported into a cleaned dataset
+
+- `Chatty-art -> ChattyCog Sandbox`
+  sends selected generated outputs into the shared sandbox review/staging area so ChattyCog or another downstream module can inspect them
+
+If a sibling module sends LoRAs back to Chatty-art, the hosted `LoRA Stack` area can also show an inbox panel:
+- you review the incoming LoRA files
+- you choose the target family bucket
+- Chatty-art copies them into `models/loras/<family>/`
+
+Deleting selected outputs removes:
+- the chosen saved output file from `outputs/`
+- any matching `*.json`, `*.planner.json`, or `*.compiler.json` sidecars tied to that output
+
 ## What kind of output to expect
 
 Chatty-art is designed to be simple and local.
@@ -1588,6 +1798,9 @@ If you are in `Realism` mode, also check:
 - your model's extra support files are also present in `models/`
 - `Qwen Image` has its VAE and Qwen2.5-VL text encoder
 - `Wan` has its VAE and `umt5`/`t5xxl` text encoder
+  - `Wan2.1` usually pairs with `wan_2.1_vae.safetensors`
+  - `Wan2.2 TI2V 5B` prefers `Wan2.2_VAE.safetensors`
+  - `Wan2.2` A14B T2V / I2V also prefers `Wan2.2_VAE.safetensors`
 - some reference-guided Wan variants also need `clip_vision_h.safetensors`
 
 Also check that:
@@ -1606,6 +1819,9 @@ Common examples:
 - `Qwen Image` also needs a Qwen2.5-VL text encoder
 - `Wan` needs a Wan VAE
 - `Wan` also needs a `umt5` or `t5xxl` text encoder
+  - `Wan2.1` usually pairs with `wan_2.1_vae.safetensors`
+  - `Wan2.2 TI2V 5B` prefers `Wan2.2_VAE.safetensors`
+  - `Wan2.2` A14B T2V / I2V also prefers `Wan2.2_VAE.safetensors`
 
 Try these fixes:
 

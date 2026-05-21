@@ -6,15 +6,18 @@ mod sdcpp;
 mod types;
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     io::ErrorKind,
     net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::Arc,
+    path::{Component, Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     extract::{
@@ -29,7 +32,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use rand::random;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::{
     net::TcpListener,
@@ -55,15 +58,16 @@ use crate::{
     },
     sdcpp::{detect_sdcpp_support, generate_with_sdcpp, realism_runtime_status},
     types::{
-        AssetSource, BackendRuntimeStatus, EstimateConfidence, GenerateAccepted,
-        GenerateRequest, GenerationSettings, GenerationStyle, HardwareProfile, InputAsset,
-        LoraInfo, MediaKind, ModelBackend, ModelInfo, OutputEntry, PrepareResponse,
-        PromptAssistMode, ReferenceSummary, ResolutionPreset, RuntimeAcceleration,
-        RuntimeStatus, ServerEvent, TimeEstimate, VideoResolutionPreset,
+        AssetSource, BackendRuntimeStatus, CancelAccepted, CancelRequest, EstimateConfidence,
+        GenerateAccepted, GenerateRequest, GenerationSettings, GenerationStyle, HardwareProfile,
+        InputAsset, LoraInfo, MediaKind, ModelBackend, ModelInfo, OutputEntry, PrepareResponse,
+        PromptAssistMode, ReferenceSummary, ResolutionPreset, RuntimeAcceleration, RuntimeStatus,
+        ServerEvent, TimeEstimate, VideoResolutionPreset,
     },
 };
 
 const MAX_RUNTIME_SEED: u64 = u32::MAX as u64;
+const GENERATION_CANCELED_MESSAGE: &str = "Generation canceled.";
 
 #[derive(Debug)]
 struct AppPaths {
@@ -77,7 +81,7 @@ struct AppPaths {
 
 impl AppPaths {
     fn discover() -> Result<Self> {
-        let root = std::env::current_dir().context("failed to get current directory")?;
+        let root = discover_app_root()?;
         Ok(Self {
             models_dir: root.join("models"),
             input_dir: root.join("input"),
@@ -102,6 +106,41 @@ impl AppPaths {
     }
 }
 
+fn discover_app_root() -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.push(std::env::current_dir().context("failed to get current directory")?);
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            candidates.push(parent.to_path_buf());
+        }
+    }
+
+    for candidate in candidates {
+        if let Some(root) = find_chatty_art_root(&candidate) {
+            return Ok(root);
+        }
+    }
+
+    bail!(
+        "Could not find the Chatty-art project root. Start the app from inside the project folder, or make sure the folder contains Cargo.toml, src/main.rs, and static/index.html."
+    )
+}
+
+fn find_chatty_art_root(start: &Path) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
+        if is_chatty_art_root(ancestor) {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+fn is_chatty_art_root(path: &Path) -> bool {
+    path.join("Cargo.toml").exists()
+        && path.join("src").join("main.rs").exists()
+        && path.join("static").join("index.html").exists()
+}
+
 #[derive(Clone)]
 struct AppState {
     paths: Arc<AppPaths>,
@@ -109,6 +148,38 @@ struct AppState {
     generation_gate: Arc<Semaphore>,
     gpu_telemetry: Arc<RwLock<GpuTelemetrySnapshot>>,
     hardware_profile: Arc<HardwareProfile>,
+    active_jobs: Arc<Mutex<HashMap<Uuid, Arc<JobControl>>>>,
+}
+
+#[derive(Debug)]
+struct JobControl {
+    canceled: AtomicBool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BridgeLoraImportRequest {
+    lane_id: String,
+    asset_ids: Vec<String>,
+    family_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteOutputsRequest {
+    relative_paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteOutputsResponse {
+    deleted_paths: Vec<String>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BridgeIncomingAssetRecord {
+    #[serde(default)]
+    payload_file_name: String,
+    #[serde(default)]
+    file_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +229,48 @@ struct PromptAssistTraceSidecar {
 
 type ApiResult<T> = std::result::Result<Json<T>, (StatusCode, String)>;
 
+fn register_job(state: &AppState, job_id: Uuid) -> Arc<JobControl> {
+    let control = Arc::new(JobControl {
+        canceled: AtomicBool::new(false),
+    });
+    if let Ok(mut jobs) = state.active_jobs.lock() {
+        jobs.insert(job_id, control.clone());
+    }
+    control
+}
+
+fn find_job_control(state: &AppState, job_id: Uuid) -> Option<Arc<JobControl>> {
+    state
+        .active_jobs
+        .lock()
+        .ok()
+        .and_then(|jobs| jobs.get(&job_id).cloned())
+}
+
+fn unregister_job(state: &AppState, job_id: Uuid) {
+    if let Ok(mut jobs) = state.active_jobs.lock() {
+        jobs.remove(&job_id);
+    }
+}
+
+fn job_is_canceled(control: &Arc<JobControl>) -> bool {
+    control.canceled.load(Ordering::SeqCst)
+}
+
+fn ensure_not_canceled(control: &Arc<JobControl>) -> Result<()> {
+    if job_is_canceled(control) {
+        anyhow::bail!(GENERATION_CANCELED_MESSAGE);
+    }
+    Ok(())
+}
+
+fn is_cancellation_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("generation canceled")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -178,6 +291,7 @@ async fn main() -> Result<()> {
         generation_gate: Arc::new(Semaphore::new(1)),
         gpu_telemetry: gpu_telemetry.clone(),
         hardware_profile,
+        active_jobs: Arc::new(Mutex::new(HashMap::new())),
     };
     spawn_gpu_sampler(gpu_telemetry);
 
@@ -187,13 +301,16 @@ async fn main() -> Result<()> {
         .route("/styles.css", get(styles_css))
         .route("/api/models", get(list_models))
         .route("/api/loras", get(list_loras))
+        .route("/api/loras/import-bridge", post(import_bridge_loras))
         .route("/api/runtime", get(runtime_status))
         .route("/api/hardware", get(hardware_profile_status))
         .route("/api/telemetry/gpu", get(gpu_telemetry_status))
         .route("/api/assets", get(list_assets))
         .route("/api/outputs", get(list_outputs))
+        .route("/api/outputs/delete", post(delete_outputs))
         .route("/api/prepare", post(prepare_generate))
         .route("/api/generate", post(start_generate))
+        .route("/api/cancel", post(cancel_generate))
         .route("/ws", get(websocket_endpoint))
         .nest_service("/outputs", ServeDir::new(paths.outputs_dir.clone()))
         .nest_service("/input", ServeDir::new(paths.input_dir.clone()))
@@ -289,6 +406,20 @@ async fn list_loras(State(state): State<AppState>) -> ApiResult<Vec<LoraInfo>> {
         .map_err(internal_error)
 }
 
+async fn import_bridge_loras(
+    State(state): State<AppState>,
+    Json(request): Json<BridgeLoraImportRequest>,
+) -> impl IntoResponse {
+    match import_bridge_lora_files(&state.paths, request) {
+        Ok(notes) => Json(serde_json::json!({ "notes": notes })).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 async fn runtime_status(State(state): State<AppState>) -> ApiResult<RuntimeStatus> {
     Ok(Json(RuntimeStatus {
         expressive: expressive_runtime_status(&state.paths.runtime_dir),
@@ -323,20 +454,28 @@ async fn styles_css() -> impl IntoResponse {
 }
 
 fn expressive_runtime_status(runtime_dir: &Path) -> BackendRuntimeStatus {
+    let has_llama_cli = runtime_dir.join("llama-cli.exe").exists();
     let has_vulkan = runtime_dir.join("ggml-vulkan.dll").exists();
     BackendRuntimeStatus {
         backend: ModelBackend::LlamaCpp,
-        label: if has_vulkan {
+        label: if !has_llama_cli {
+            "Runtime missing".to_string()
+        } else if has_vulkan {
             "Vulkan-ready".to_string()
         } else {
             "Bundled runtime".to_string()
         },
-        acceleration: if has_vulkan {
+        acceleration: if !has_llama_cli {
+            RuntimeAcceleration::IncompleteTree
+        } else if has_vulkan {
             RuntimeAcceleration::Vulkan
         } else {
             RuntimeAcceleration::CpuOnly
         },
-        note: if has_vulkan {
+        note: if !has_llama_cli {
+            "The bundled llama.cpp runtime is missing llama-cli.exe. Restore the expressive runtime files into runtime/ to re-enable Prompt Assist and expressive generation."
+                .to_string()
+        } else if has_vulkan {
             "The bundled llama.cpp runtime includes Vulkan support for expressive planning."
                 .to_string()
         } else {
@@ -577,12 +716,28 @@ async fn list_outputs(State(state): State<AppState>) -> ApiResult<Vec<OutputEntr
         .map_err(internal_error)
 }
 
+async fn delete_outputs(
+    State(state): State<AppState>,
+    Json(request): Json<DeleteOutputsRequest>,
+) -> impl IntoResponse {
+    match delete_output_files(&state.paths, request) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Clone)]
 struct ResolvedGenerateContext {
     request: GenerateRequest,
     model: ModelInfo,
     selected_loras: Vec<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
+    vision_interpreter_model: Option<ModelInfo>,
+    vision_model_was_auto_selected: bool,
     reference_asset: Option<InputAsset>,
     end_reference_asset: Option<InputAsset>,
     control_reference_asset: Option<InputAsset>,
@@ -595,6 +750,9 @@ struct PreparedPromptState {
     compiled_prompt: Option<String>,
     prepared_spoken_text: Option<String>,
     interpreter_model_name: Option<String>,
+    vision_model_name: Option<String>,
+    vision_summary: Option<String>,
+    vision_error: Option<String>,
     assumptions: Vec<String>,
     focus_tags: Vec<String>,
     used_original_prompt: bool,
@@ -624,6 +782,8 @@ async fn prepare_generate(
         &context.request,
         &context.model,
         context.prompt_interpreter_model.as_ref(),
+        context.vision_interpreter_model.as_ref(),
+        context.vision_model_was_auto_selected,
         reference_summary.as_ref(),
         context.used_seed,
     )
@@ -650,6 +810,9 @@ async fn prepare_generate(
         effective_negative_prompt: prepared.effective_request.negative_prompt.clone(),
         prompt_assist: context.request.prompt_assist,
         interpreter_model: prepared.interpreter_model_name,
+        vision_model: prepared.vision_model_name,
+        vision_summary: prepared.vision_summary,
+        vision_error: prepared.vision_error,
         note: prepared.prompt_assist_note,
         assumptions: prepared.assumptions,
         focus_tags: prepared.focus_tags,
@@ -692,6 +855,7 @@ async fn start_generate(
 ) -> ApiResult<GenerateAccepted> {
     let context = resolve_generate_context(&state, request)?;
     let job_id = Uuid::new_v4();
+    let job_control = register_job(&state, job_id);
     let batch_total = context.request.normalized_batch_count();
     let accepted_seed = if batch_total == 1 {
         Some(u64::from(context.used_seed))
@@ -704,9 +868,11 @@ async fn start_generate(
         if let Err(error) = run_generation_batch(
             task_state.clone(),
             job_id,
+            job_control.clone(),
             context.model,
             context.selected_loras,
             context.prompt_interpreter_model,
+            context.vision_interpreter_model,
             context.request,
             context.reference_asset,
             context.end_reference_asset,
@@ -714,18 +880,44 @@ async fn start_generate(
             context.used_seed,
         )
         .await {
-            let _ = task_state.events.send(ServerEvent::Error {
-                job_id,
-                message: error.to_string(),
-            });
-            error!("{error:#}");
+            if is_cancellation_error(&error) {
+                let _ = task_state.events.send(ServerEvent::Canceled {
+                    job_id,
+                    message: GENERATION_CANCELED_MESSAGE.to_string(),
+                });
+            } else {
+                let _ = task_state.events.send(ServerEvent::Error {
+                    job_id,
+                    message: error.to_string(),
+                });
+                error!("{error:#}");
+            }
         }
+        unregister_job(&task_state, job_id);
     });
 
     Ok(Json(GenerateAccepted {
         job_id,
         used_seed: accepted_seed,
         batch_total,
+    }))
+}
+
+async fn cancel_generate(
+    State(state): State<AppState>,
+    Json(request): Json<CancelRequest>,
+) -> ApiResult<CancelAccepted> {
+    let Some(control) = find_job_control(&state, request.job_id) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "That job is no longer active, so there is nothing to cancel.".to_string(),
+        ));
+    };
+
+    control.canceled.store(true, Ordering::SeqCst);
+    Ok(Json(CancelAccepted {
+        job_id: request.job_id,
+        accepted: true,
     }))
 }
 
@@ -992,24 +1184,118 @@ fn resolve_generate_context(
     request.settings.seed = Some(u64::from(used_seed));
     let prompt_interpreter_model =
         if request.prompt_assist != PromptAssistMode::Off && request.prepared_prompt.is_none() {
-            Some(
-                choose_prompt_interpreter_model(&models, &model).ok_or_else(|| {
-                    (
-                    StatusCode::BAD_REQUEST,
-                    "Prompt Assist needs at least one local expressive llama.cpp model in models/."
-                        .to_string(),
+            if let Some(selected_prompt_model) = request
+                .selected_prompt_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(
+                    models
+                        .iter()
+                        .find(|candidate| {
+                            candidate.id == selected_prompt_model
+                                || candidate.relative_path == selected_prompt_model
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            (
+                                StatusCode::BAD_REQUEST,
+                                format!(
+                                    "Prompt Assist model '{}' was not found in models/.",
+                                    selected_prompt_model
+                                ),
+                            )
+                        })
+                        .and_then(|candidate| {
+                            if supports_manual_prompt_interpreter(&candidate) {
+                                Ok(candidate)
+                            } else {
+                                Err((
+                                    StatusCode::BAD_REQUEST,
+                                    format!(
+                                        "'{}' is not ready to act as a Prompt Assist interpreter. Pick a local expressive llama.cpp model.",
+                                        candidate.name
+                                    ),
+                                ))
+                            }
+                        })?,
                 )
-                })?,
-            )
+            } else {
+                Some(
+                    choose_prompt_interpreter_model(&models, &model).ok_or_else(|| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            "Prompt Assist needs at least one local expressive llama.cpp model in models/."
+                                .to_string(),
+                        )
+                    })?,
+                )
+            }
         } else {
             None
         };
+    let vision_interpreter_model = if request.prompt_assist != PromptAssistMode::Off
+        && request.prepared_prompt.is_none()
+        && reference_asset.as_ref().is_some_and(|asset| asset.kind == MediaKind::Image)
+    {
+        if let Some(selected_vision_model) = request
+            .selected_vision_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(
+                models
+                    .iter()
+                    .find(|candidate| {
+                        candidate.id == selected_vision_model
+                            || candidate.relative_path == selected_vision_model
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "Vision Assist model '{}' was not found in models/.",
+                                selected_vision_model
+                            ),
+                        )
+                    })
+                    .and_then(|candidate| {
+                        if supports_vision_interpreter(&candidate) {
+                            Ok(candidate)
+                        } else {
+                            Err((
+                                StatusCode::BAD_REQUEST,
+                                format!(
+                                    "'{}' is not ready to act as a Vision Assist helper. Pick a local expressive multimodal model with an mmproj companion.",
+                                    candidate.name
+                                ),
+                            ))
+                        }
+                    })?,
+            )
+        } else {
+            choose_vision_interpreter_model(&models, &model, prompt_interpreter_model.as_ref())
+        }
+    } else {
+        None
+    };
+    let vision_model_was_auto_selected = request
+        .selected_vision_model
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(|value| value.is_empty())
+        && vision_interpreter_model.is_some();
 
     Ok(ResolvedGenerateContext {
         request,
         model,
         selected_loras,
         prompt_interpreter_model,
+        vision_interpreter_model,
+        vision_model_was_auto_selected,
         reference_asset,
         end_reference_asset,
         control_reference_asset,
@@ -1073,8 +1359,20 @@ fn merge_manual_prompt_items(base: &mut Vec<String>, extra: &[String], limit: us
     }
 }
 
-fn append_manual_prompt_note(base: &str, assumptions: &[String], focus_tags: &[String]) -> String {
-    if assumptions.is_empty() && focus_tags.is_empty() {
+fn append_manual_prompt_note(
+    base: &str,
+    assumptions: &[String],
+    focus_tags: &[String],
+    preserve_items: &[String],
+    change_targets: &[String],
+    avoid_items: &[String],
+) -> String {
+    if assumptions.is_empty()
+        && focus_tags.is_empty()
+        && preserve_items.is_empty()
+        && change_targets.is_empty()
+        && avoid_items.is_empty()
+    {
         return base.to_string();
     }
 
@@ -1087,6 +1385,21 @@ fn append_manual_prompt_note(base: &str, assumptions: &[String], focus_tags: &[S
             "Manual assumptions: {}",
             assumptions.join(", ")
         ));
+    }
+    if !preserve_items.is_empty() {
+        additions.push(format!(
+            "Manual keep / preserve: {}",
+            preserve_items.join(", ")
+        ));
+    }
+    if !change_targets.is_empty() {
+        additions.push(format!(
+            "Manual change targets: {}",
+            change_targets.join(", ")
+        ));
+    }
+    if !avoid_items.is_empty() {
+        additions.push(format!("Manual avoid: {}", avoid_items.join(", ")));
     }
 
     let addition = format!("Added to the handoff. {}", additions.join(" "));
@@ -1102,12 +1415,17 @@ async fn build_prompt_handoff(
     request: &GenerateRequest,
     model: &ModelInfo,
     prompt_interpreter_model: Option<&ModelInfo>,
+    vision_interpreter_model: Option<&ModelInfo>,
+    vision_model_was_auto_selected: bool,
     reference_summary: Option<&ReferenceSummary>,
     used_seed: u32,
 ) -> Result<PreparedPromptState> {
     let mut effective_request = request.clone();
     let manual_focus_tags = normalize_manual_prompt_items(&request.manual_focus_tags, 10);
     let manual_assumptions = normalize_manual_prompt_items(&request.manual_assumptions, 6);
+    let manual_preserve_items = normalize_manual_prompt_items(&request.manual_preserve_items, 8);
+    let manual_change_targets = normalize_manual_prompt_items(&request.manual_change_targets, 8);
+    let manual_avoid_items = normalize_manual_prompt_items(&request.manual_avoid_items, 8);
     let is_speech_audio = request.kind == MediaKind::Audio
         && model.backend == ModelBackend::AudioRuntime
         && model.supports_voice_output;
@@ -1167,6 +1485,9 @@ async fn build_prompt_handoff(
                 }),
                 &manual_assumptions,
                 &manual_focus_tags,
+                &manual_preserve_items,
+                &manual_change_targets,
+                &manual_avoid_items,
             ),
             compiled_prompt: request
                 .prepared_prompt
@@ -1176,6 +1497,9 @@ async fn build_prompt_handoff(
                 .map(str::to_string),
             prepared_spoken_text: spoken_text,
             interpreter_model_name: request.prepared_interpreter_model.clone(),
+            vision_model_name: None,
+            vision_summary: None,
+            vision_error: None,
             assumptions: manual_assumptions,
             focus_tags: manual_focus_tags,
             used_original_prompt: false,
@@ -1211,12 +1535,20 @@ async fn build_prompt_handoff(
                         .to_string()
                 } else {
                     "Speech handoff separated the words to be spoken from the delivery description. Only the Spoken Text field will be voiced.".to_string()
-                }.as_str(),
+                }
+                .as_str(),
                 &manual_assumptions,
-                &manual_focus_tags),
+                &manual_focus_tags,
+                &manual_preserve_items,
+                &manual_change_targets,
+                &manual_avoid_items,
+                ),
                 compiled_prompt: direction,
                 prepared_spoken_text: Some(spoken_text),
                 interpreter_model_name: None,
+                vision_model_name: None,
+                vision_summary: None,
+                vision_error: None,
                 assumptions: manual_assumptions,
                 focus_tags: manual_focus_tags,
                 used_original_prompt: true,
@@ -1245,10 +1577,17 @@ async fn build_prompt_handoff(
                 String::new()
             }),
             &manual_assumptions,
-            &manual_focus_tags),
+            &manual_focus_tags,
+            &manual_preserve_items,
+            &manual_change_targets,
+            &manual_avoid_items,
+            ),
             compiled_prompt: None,
             prepared_spoken_text: None,
             interpreter_model_name: None,
+            vision_model_name: None,
+            vision_summary: None,
+            vision_error: None,
             assumptions: manual_assumptions,
             focus_tags: manual_focus_tags,
             used_original_prompt: true,
@@ -1266,8 +1605,13 @@ async fn build_prompt_handoff(
         &paths.runtime_dir,
         &paths.models_dir,
         interpreter_model,
+        vision_interpreter_model,
+        vision_model_was_auto_selected,
         &request.prompt,
         request.negative_prompt.as_deref(),
+        &manual_preserve_items,
+        &manual_change_targets,
+        &manual_avoid_items,
         request.style,
         request.kind,
         request.prompt_assist,
@@ -1320,10 +1664,20 @@ async fn build_prompt_handoff(
 
     Ok(PreparedPromptState {
         effective_request,
-        prompt_assist_note: append_manual_prompt_note(&compiled.note, &manual_assumptions, &manual_focus_tags),
+        prompt_assist_note: append_manual_prompt_note(
+            &compiled.note,
+            &manual_assumptions,
+            &manual_focus_tags,
+            &manual_preserve_items,
+            &manual_change_targets,
+            &manual_avoid_items,
+        ),
         compiled_prompt: (!compiled_prompt.trim().is_empty()).then_some(compiled_prompt.clone()),
         prepared_spoken_text: spoken_text.clone(),
         interpreter_model_name: Some(interpreter_model.name.clone()),
+        vision_model_name: compiled.vision_model_name.clone(),
+        vision_summary: compiled.vision_summary.clone(),
+        vision_error: compiled.vision_error.clone(),
         assumptions: assumptions.clone(),
         focus_tags: focus_tags.clone(),
         used_original_prompt: compiled.used_original_prompt,
@@ -1547,14 +1901,17 @@ fn estimate_generation_time(
 async fn run_generation_job(
     state: AppState,
     job_id: Uuid,
+    job_control: Arc<JobControl>,
     model: ModelInfo,
     selected_loras: Vec<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
+    vision_interpreter_model: Option<ModelInfo>,
     request: GenerateRequest,
     reference_asset: Option<InputAsset>,
     end_reference_asset: Option<InputAsset>,
     control_reference_asset: Option<InputAsset>,
 ) -> Result<()> {
+    ensure_not_canceled(&job_control)?;
     emit_progress(
         &state,
         job_id,
@@ -1569,6 +1926,7 @@ async fn run_generation_job(
         .acquire_owned()
         .await
         .context("generation gate was closed")?;
+    ensure_not_canceled(&job_control)?;
 
     emit_progress(
         &state,
@@ -1641,6 +1999,13 @@ async fn run_generation_job(
             &request,
             &model,
             prompt_interpreter_model.as_ref(),
+            vision_interpreter_model.as_ref(),
+            request
+                .selected_vision_model
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(|value| value.is_empty())
+                && vision_interpreter_model.is_some(),
             reference_summary.as_ref(),
             used_seed,
         )
@@ -1649,6 +2014,7 @@ async fn run_generation_job(
             let _ = stop.send(());
         }
         let prepared = prepared_result?;
+        ensure_not_canceled(&job_control)?;
         prompt_assist_note = prepared.prompt_assist_note;
         effective_request = prepared.effective_request;
         interpreter_model_name = prepared.interpreter_model_name;
@@ -1697,6 +2063,7 @@ async fn run_generation_job(
                     .await;
                     let _ = heartbeat.send(());
                     let planned = plan_result?;
+                    ensure_not_canceled(&job_control)?;
                     let note = planned.note.clone();
                     let trace = planned.trace.clone();
 
@@ -1744,6 +2111,7 @@ async fn run_generation_job(
                     .await;
                     let _ = heartbeat.send(());
                     let planned = plan_result?;
+                    ensure_not_canceled(&job_control)?;
                     let note = planned.note.clone();
                     let trace = planned.trace.clone();
 
@@ -1796,6 +2164,7 @@ async fn run_generation_job(
                     .await;
                     let _ = heartbeat.send(());
                     let planned = plan_result?;
+                    ensure_not_canceled(&job_control)?;
                     let note = planned.note.clone();
                     let trace = planned.trace.clone();
 
@@ -1863,6 +2232,7 @@ async fn run_generation_job(
                 control_reference_asset.as_ref(),
                 used_seed,
                 &output_path,
+                &job_control.canceled,
             )
             .await?;
 
@@ -1905,6 +2275,7 @@ async fn run_generation_job(
                 reference_asset.as_ref(),
                 used_seed,
                 &output_path,
+                &job_control.canceled,
             )
             .await?;
 
@@ -2062,9 +2433,11 @@ async fn run_generation_job(
 async fn run_generation_batch(
     state: AppState,
     job_id: Uuid,
+    job_control: Arc<JobControl>,
     model: ModelInfo,
     selected_loras: Vec<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
+    vision_interpreter_model: Option<ModelInfo>,
     request: GenerateRequest,
     reference_asset: Option<InputAsset>,
     end_reference_asset: Option<InputAsset>,
@@ -2074,6 +2447,7 @@ async fn run_generation_batch(
     let batch_total = request.normalized_batch_count();
 
     for batch_index in 0..batch_total {
+        ensure_not_canceled(&job_control)?;
         let mut run_request = request.clone();
         run_request.batch_count = 1;
         let seed = if batch_total == 1 {
@@ -2100,9 +2474,11 @@ async fn run_generation_batch(
         run_generation_job(
             state.clone(),
             job_id,
+            job_control.clone(),
             model.clone(),
             selected_loras.clone(),
             prompt_interpreter_model.clone(),
+            vision_interpreter_model.clone(),
             run_request,
             reference_asset.clone(),
             end_reference_asset.clone(),
@@ -2111,6 +2487,7 @@ async fn run_generation_batch(
         .await?;
 
         if batch_total > 1 && batch_index + 1 < batch_total {
+            ensure_not_canceled(&job_control)?;
             emit_progress(
                 &state,
                 job_id,
@@ -2298,7 +2675,7 @@ fn scan_models(
         }
 
         let relative_path = to_slash_path(path.strip_prefix(models_dir)?);
-        let mmproj_path = find_sibling_file(models_dir, path, |name| name.contains("mmproj"));
+        let mmproj_path = find_mmproj_file(models_dir, path);
         let slug = slugify(
             path.file_stem()
                 .and_then(|value| value.to_str())
@@ -2415,6 +2792,234 @@ fn available_lora_dirs(models_dir: &Path) -> Vec<PathBuf> {
         .map(|name| models_dir.join(name))
         .filter(|path| path.exists() && path.is_dir())
         .collect()
+}
+
+fn import_bridge_lora_files(paths: &AppPaths, request: BridgeLoraImportRequest) -> Result<Vec<String>> {
+    let lane_id = sanitize_bridge_lane_id(&request.lane_id);
+    if lane_id.is_empty() {
+        bail!("Bridge lane id is required.");
+    }
+    let family_key = sanitize_bridge_family_key(&request.family_key);
+    if family_key.is_empty() {
+        bail!("Choose a LoRA family folder first.");
+    }
+
+    let requested_asset_ids = request
+        .asset_ids
+        .into_iter()
+        .map(|asset_id| asset_id.trim().to_string())
+        .filter(|asset_id| !asset_id.is_empty())
+        .collect::<Vec<_>>();
+    if requested_asset_ids.is_empty() {
+        bail!("Select at least one bridge LoRA first.");
+    }
+
+    let lane_dir = paths
+        .models_dir
+        .parent()
+        .unwrap_or(&paths.models_dir)
+        .join("bridge")
+        .join("incoming_assets")
+        .join(&lane_id);
+    let root = paths
+        .models_dir
+        .parent()
+        .unwrap_or(&paths.models_dir)
+        .canonicalize()
+        .with_context(|| format!("could not resolve {}", paths.models_dir.display()))?;
+    let lane_dir = lane_dir
+        .canonicalize()
+        .with_context(|| format!("could not resolve {}", lane_dir.display()))?;
+    if !lane_dir.starts_with(&root) {
+        bail!("Refusing to import a bridge lane outside the local Chatty-art project folder.");
+    }
+
+    let target_dir = paths.models_dir.join("loras").join(&family_key);
+    std::fs::create_dir_all(&target_dir)
+        .with_context(|| format!("could not create {}", target_dir.display()))?;
+
+    let mut notes = Vec::new();
+    let mut imported = 0usize;
+    for asset_id in requested_asset_ids {
+        let record_path = lane_dir.join(format!("{asset_id}.json"));
+        let record_bytes = std::fs::read(&record_path)
+            .with_context(|| format!("could not read {}", record_path.display()))?;
+        let record: BridgeIncomingAssetRecord = serde_json::from_slice(&record_bytes)
+            .with_context(|| format!("could not parse {}", record_path.display()))?;
+        let payload_path = lane_dir.join(record.payload_file_name.trim());
+        if !payload_path.is_file() {
+            bail!("Bridge payload file is missing for asset {}.", asset_id);
+        }
+        if !has_extension(&payload_path, "safetensors") && !has_extension(&payload_path, "ckpt") {
+            bail!(
+                "Bridge asset {} is not a supported LoRA file. Chatty-art expects .safetensors or .ckpt.",
+                asset_id
+            );
+        }
+
+        let file_name = payload_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(record.file_name.as_str());
+        let destination_path = unique_lora_destination_path(&target_dir, file_name);
+        std::fs::copy(&payload_path, &destination_path).with_context(|| {
+            format!(
+                "copy {} -> {}",
+                payload_path.display(),
+                destination_path.display()
+            )
+        })?;
+        imported += 1;
+    }
+
+    if imported == 0 {
+        notes.push("No bridge LoRA files were imported.".to_string());
+    } else {
+        notes.push(format!(
+            "Imported {} bridge LoRA file{} into models/loras/{}.",
+            imported,
+            if imported == 1 { "" } else { "s" },
+            family_key
+        ));
+    }
+
+    Ok(notes)
+}
+
+fn sanitize_bridge_lane_id(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch.to_ascii_lowercase(),
+            _ => '-',
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn sanitize_bridge_family_key(raw: &str) -> String {
+    let normalized = sanitize_bridge_lane_id(raw);
+    match normalized.as_str() {
+        "flux" | "sd" | "sd3" | "wan" | "qwen" => normalized,
+        _ => String::new(),
+    }
+}
+
+fn sanitize_output_relative_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            _ => return None,
+        }
+    }
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
+}
+
+fn delete_output_files(paths: &AppPaths, request: DeleteOutputsRequest) -> Result<DeleteOutputsResponse> {
+    let mut relative_paths = request.relative_paths;
+    relative_paths.sort();
+    relative_paths.dedup();
+    if relative_paths.is_empty() {
+        bail!("Select at least one saved output to delete.");
+    }
+
+    let outputs_root = paths
+        .outputs_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", paths.outputs_dir.display()))?;
+    let mut deleted_paths = Vec::new();
+    let mut deleted_sidecars = 0usize;
+
+    for relative in relative_paths {
+        let rel_path = sanitize_output_relative_path(&relative)
+            .ok_or_else(|| anyhow::anyhow!("invalid output path `{relative}`"))?;
+        let candidate = paths.outputs_dir.join(&rel_path);
+        let resolved = candidate
+            .canonicalize()
+            .with_context(|| format!("could not resolve {}", candidate.display()))?;
+        if !resolved.starts_with(&outputs_root) {
+            bail!("output path escapes outputs/: {}", relative);
+        }
+        if !resolved.is_file() {
+            bail!("output file was not found: {}", relative);
+        }
+
+        std::fs::remove_file(&resolved)
+            .with_context(|| format!("could not delete {}", resolved.display()))?;
+        deleted_paths.push(to_slash_path(rel_path.as_path()));
+
+        let file_name = resolved
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let parent = resolved.parent().unwrap_or(&outputs_root);
+        for sidecar_name in [
+            format!("{file_name}.json"),
+            format!("{file_name}.compiler.json"),
+            format!("{file_name}.planner.json"),
+        ] {
+            let sidecar = parent.join(sidecar_name);
+            if sidecar.is_file() {
+                std::fs::remove_file(&sidecar)
+                    .with_context(|| format!("could not delete {}", sidecar.display()))?;
+                deleted_sidecars += 1;
+            }
+        }
+    }
+
+    let mut notes = vec![format!(
+        "Deleted {} saved output file{} from outputs/.",
+        deleted_paths.len(),
+        if deleted_paths.len() == 1 { "" } else { "s" }
+    )];
+    if deleted_sidecars > 0 {
+        notes.push(format!(
+            "Also removed {} metadata sidecar{} that belonged to those outputs.",
+            deleted_sidecars,
+            if deleted_sidecars == 1 { "" } else { "s" }
+        ));
+    }
+
+    Ok(DeleteOutputsResponse {
+        deleted_paths,
+        notes,
+    })
+}
+
+fn unique_lora_destination_path(target_dir: &Path, file_name: &str) -> PathBuf {
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("imported-lora");
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("safetensors");
+
+    let mut candidate = target_dir.join(format!("{stem}.{ext}"));
+    let mut suffix = 2usize;
+    while candidate.exists() {
+        candidate = target_dir.join(format!("{stem}-{suffix}.{ext}"));
+        suffix += 1;
+    }
+    candidate
 }
 
 fn infer_lora_family_key(relative_path: &str, file_name: &str) -> Option<String> {
@@ -2695,21 +3300,96 @@ fn infer_output_media(path: &Path) -> Option<(MediaKind, String)> {
     }
 }
 
-fn find_sibling_file(
-    models_dir: &Path,
-    path: &Path,
-    predicate: impl Fn(&str) -> bool,
-) -> Option<String> {
+fn find_mmproj_file(models_dir: &Path, path: &Path) -> Option<String> {
     let parent = path.parent()?;
+    let model_name = path.file_name()?.to_str()?.to_ascii_lowercase();
     let matches = std::fs::read_dir(parent).ok()?;
-    for entry in matches.flatten() {
-        let candidate = entry.path();
-        let candidate_name = candidate.file_name()?.to_str()?.to_ascii_lowercase();
-        if candidate != path && has_extension(&candidate, "gguf") && predicate(&candidate_name) {
+    let candidates = matches
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|candidate| candidate != path && has_extension(candidate, "gguf"))
+        .filter_map(|candidate| {
+            let candidate_name = candidate.file_name()?.to_str()?.to_ascii_lowercase();
+            if !candidate_name.contains("mmproj") {
+                return None;
+            }
+            Some((candidate, candidate_name))
+        })
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    for (candidate, candidate_name) in &candidates {
+        if is_probable_mmproj_match(&model_name, candidate_name) {
             return candidate.strip_prefix(models_dir).ok().map(to_slash_path);
         }
     }
+
+    if candidates.len() == 1 {
+        return candidates[0]
+            .0
+            .strip_prefix(models_dir)
+            .ok()
+            .map(to_slash_path);
+    }
+
     None
+}
+
+fn is_probable_mmproj_match(model_name: &str, candidate_name: &str) -> bool {
+    let model_tokens = meaningful_mmproj_tokens(model_name);
+    let candidate_tokens = meaningful_mmproj_tokens(candidate_name);
+    let shared = model_tokens
+        .iter()
+        .filter(|token| candidate_tokens.contains(token))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    match shared.len() {
+        0 => false,
+        len if len >= 2 => true,
+        _ => matches!(shared[0].as_str(), "moondream2"),
+    }
+}
+
+fn meaningful_mmproj_tokens(name: &str) -> Vec<String> {
+    name.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.'))
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| {
+            token.len() >= 3
+                || token == "vl"
+                || (token.ends_with('b')
+                    && token.len() >= 2
+                    && token[..token.len() - 1].chars().all(|ch| ch.is_ascii_digit()))
+        })
+        .filter(|token| {
+            !matches!(
+                token.as_str(),
+                "gguf"
+                    | "mmproj"
+                    | "model"
+                    | "text"
+                    | "f16"
+                    | "q2"
+                    | "q3"
+                    | "q4"
+                    | "q5"
+                    | "q6"
+                    | "q8"
+                    | "imat"
+                    | "instruct"
+                    | "chat"
+                    | "alpha"
+                    | "beta"
+                    | "one"
+                    | "two"
+                    | "three"
+                    | "abliterated"
+            )
+        })
+        .collect()
 }
 
 fn has_sibling_vocoder(path: &Path) -> bool {
@@ -2759,6 +3439,41 @@ fn choose_prompt_interpreter_model(
     candidates.into_iter().next()
 }
 
+fn choose_vision_interpreter_model(
+    models: &[ModelInfo],
+    selected_model: &ModelInfo,
+    prompt_interpreter_model: Option<&ModelInfo>,
+) -> Option<ModelInfo> {
+    if prompt_interpreter_model.is_some_and(supports_vision_interpreter) {
+        return prompt_interpreter_model.cloned();
+    }
+
+    let mut candidates = models
+        .iter()
+        .filter(|model| supports_vision_interpreter(model))
+        .cloned()
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+
+    candidates.sort_by(|left, right| {
+        vision_interpreter_sort_key(left)
+            .cmp(&vision_interpreter_sort_key(right))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+    });
+
+    if supports_vision_interpreter(selected_model) {
+        let selected_size = parameter_hint(&selected_model.name);
+        let smallest_size = parameter_hint(&candidates[0].name);
+        if selected_size <= smallest_size.saturating_add(2) {
+            return Some(selected_model.clone());
+        }
+    }
+
+    candidates.into_iter().next()
+}
+
 fn supports_prompt_interpreter(model: &ModelInfo) -> bool {
     model.runtime_supported
         && model.backend == ModelBackend::LlamaCpp
@@ -2767,8 +3482,40 @@ fn supports_prompt_interpreter(model: &ModelInfo) -> bool {
         && !model.supports_voice_output
 }
 
+fn supports_manual_prompt_interpreter(model: &ModelInfo) -> bool {
+    supports_prompt_interpreter(model)
+}
+
+fn supports_vision_interpreter(model: &ModelInfo) -> bool {
+    supports_prompt_interpreter(model) && model.supports_image_reference && model.mmproj_path.is_some()
+}
+
 fn prompt_interpreter_sort_key(model: &ModelInfo) -> (u32, u8) {
     (
+        parameter_hint(&model.name),
+        if model.family.eq_ignore_ascii_case("vision") {
+            1
+        } else {
+            0
+        },
+    )
+}
+
+fn vision_interpreter_sort_key(model: &ModelInfo) -> (u8, u32, u8) {
+    let lower = model.name.to_ascii_lowercase();
+    let family_bias = if lower.contains("qwen2.5-vl") {
+        0
+    } else if lower.contains("llava") {
+        1
+    } else if lower.contains("qwen2-vl-2b") {
+        3
+    } else if lower.contains("moondream") {
+        4
+    } else {
+        2
+    };
+    (
+        family_bias,
         parameter_hint(&model.name),
         if model.family.eq_ignore_ascii_case("vision") {
             1
@@ -3453,6 +4200,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_prompt_model: None,
+            selected_vision_model: None,
             selected_lora: None,
             selected_lora_weight: None,
             selected_loras: Vec::new(),
@@ -3479,6 +4228,9 @@ mod tests {
             ],
             manual_focus_tags: Vec::new(),
             manual_assumptions: Vec::new(),
+            manual_preserve_items: Vec::new(),
+            manual_change_targets: Vec::new(),
+            manual_avoid_items: Vec::new(),
         };
 
         let prepared = build_prompt_handoff(
@@ -3486,6 +4238,8 @@ mod tests {
             &request,
             &fake_audio_model("stable-audio-open-1.0", false),
             None,
+            None,
+            false,
             None,
             1234,
         )
@@ -3521,6 +4275,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_prompt_model: None,
+            selected_vision_model: None,
             selected_lora: None,
             selected_lora_weight: None,
             selected_loras: Vec::new(),
@@ -3533,6 +4289,9 @@ mod tests {
             audio_segments: Vec::new(),
             manual_focus_tags: Vec::new(),
             manual_assumptions: Vec::new(),
+            manual_preserve_items: Vec::new(),
+            manual_change_targets: Vec::new(),
+            manual_avoid_items: Vec::new(),
         };
 
         let prepared = build_prompt_handoff(
@@ -3540,6 +4299,8 @@ mod tests {
             &request,
             &fake_audio_model("stable-audio-open-1.0", false),
             None,
+            None,
+            false,
             None,
             1234,
         )
@@ -3568,6 +4329,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_prompt_model: None,
+            selected_vision_model: None,
             selected_lora: None,
             selected_lora_weight: None,
             selected_loras: Vec::new(),
@@ -3583,6 +4346,9 @@ mod tests {
                 "cinematic framing".to_string(),
             ],
             manual_assumptions: vec!["stormy coast".to_string()],
+            manual_preserve_items: Vec::new(),
+            manual_change_targets: Vec::new(),
+            manual_avoid_items: Vec::new(),
         };
 
         let prepared = build_prompt_handoff(
@@ -3590,6 +4356,8 @@ mod tests {
             &request,
             &fake_realism_image_model("stable-diffusion-v1-5", "Stable Diffusion"),
             None,
+            None,
+            false,
             None,
             1234,
         )

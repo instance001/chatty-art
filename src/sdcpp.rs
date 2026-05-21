@@ -1,14 +1,17 @@
 use std::{
     fs::File,
+    io,
     io::BufReader,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
+    time::SystemTime,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
 use gif::{Encoder, Frame, Repeat};
 use image::{AnimationDecoder, codecs::gif::GifDecoder};
-use tokio::{fs, process::Command};
+use tokio::{fs, process::Command, time::{Duration, sleep}};
 use walkdir::WalkDir;
 
 use crate::{
@@ -268,6 +271,7 @@ pub async fn generate_with_sdcpp(
     control_reference_asset: Option<&InputAsset>,
     seed: u32,
     output_path: &Path,
+    canceled: &AtomicBool,
 ) -> Result<SdcppGeneration> {
     let model_path = models_dir.join(native_relative_path(&model.relative_path));
     let recipe = detect_runtime_recipe(
@@ -349,7 +353,7 @@ pub async fn generate_with_sdcpp(
 
         let control_reference_path = control_reference_asset.disk_path(input_dir, outputs_dir);
         let control_frames_dir =
-            prepare_control_video_frames(&control_reference_path, output_path).await?;
+            prepare_control_video_frames(&control_reference_path, output_path, canceled).await?;
         temp_dirs.push(control_frames_dir.clone());
         args.push("--control-video".to_string());
         args.push(control_frames_dir.display().to_string());
@@ -360,7 +364,7 @@ pub async fn generate_with_sdcpp(
             MediaKind::Image => {
                 args.push("-o".to_string());
                 args.push(output_path.display().to_string());
-                run_sd_cli(&cli_path, diffuse_runtime_dir, &args).await?;
+                run_sd_cli(&cli_path, diffuse_runtime_dir, &args, canceled).await?;
 
                 if !output_path.exists() {
                     bail!(
@@ -385,7 +389,7 @@ pub async fn generate_with_sdcpp(
                 args.push(frame_pattern.display().to_string());
 
                 let gif_result = async {
-                    run_sd_cli(&cli_path, diffuse_runtime_dir, &args).await?;
+                    run_sd_cli(&cli_path, diffuse_runtime_dir, &args, canceled).await?;
                     encode_png_sequence_to_gif(
                         &frame_dir,
                         output_path,
@@ -407,10 +411,11 @@ pub async fn generate_with_sdcpp(
                 }
                 args.push("-o".to_string());
                 args.push(avi_output_path.display().to_string());
-                run_sd_cli(&cli_path, diffuse_runtime_dir, &args).await?;
+                run_sd_cli(&cli_path, diffuse_runtime_dir, &args, canceled).await?;
 
                 normalize_sdcpp_video_output(&avi_output_path)?;
-                let convert_result = convert_video_to_mp4(&avi_output_path, output_path).await;
+                let convert_result =
+                    convert_video_to_mp4(&avi_output_path, output_path, canceled).await;
                 let _ = fs::remove_file(&avi_output_path).await;
                 convert_result?;
 
@@ -850,8 +855,13 @@ fn normalize_sdcpp_video_output(output_path: &Path) -> Result<()> {
     );
 }
 
-async fn convert_video_to_mp4(source_path: &Path, output_path: &Path) -> Result<()> {
-    let output = Command::new("ffmpeg")
+async fn convert_video_to_mp4(
+    source_path: &Path,
+    output_path: &Path,
+    canceled: &AtomicBool,
+) -> Result<()> {
+    let mut command = Command::new("ffmpeg");
+    command
         .arg("-y")
         .arg("-loglevel")
         .arg("error")
@@ -866,14 +876,13 @@ async fn convert_video_to_mp4(source_path: &Path, output_path: &Path) -> Result<
         .arg(output_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "failed to launch ffmpeg to convert '{}' into MP4",
-                source_path.display()
-            )
-        })?;
+        .kill_on_drop(true);
+    let output = run_cancellable_output(command, canceled).await.with_context(|| {
+        format!(
+            "failed to launch ffmpeg to convert '{}' into MP4",
+            source_path.display()
+        )
+    })?;
 
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -899,6 +908,7 @@ async fn convert_video_to_mp4(source_path: &Path, output_path: &Path) -> Result<
 async fn prepare_control_video_frames(
     control_reference_path: &Path,
     output_path: &Path,
+    canceled: &AtomicBool,
 ) -> Result<PathBuf> {
     let control_dir = output_path.with_extension("control_frames");
     if control_dir.exists() {
@@ -918,7 +928,8 @@ async fn prepare_control_video_frames(
                 decode_gif_to_png_frames(control_reference_path, &control_dir)?;
             }
             "avi" | "mp4" | "webm" | "mov" | "mkv" => {
-                extract_video_frames_with_ffmpeg(control_reference_path, &control_dir).await?;
+                extract_video_frames_with_ffmpeg(control_reference_path, &control_dir, canceled)
+                    .await?;
             }
             _ => {
                 bail!(
@@ -968,9 +979,14 @@ fn decode_gif_to_png_frames(gif_path: &Path, output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn extract_video_frames_with_ffmpeg(video_path: &Path, output_dir: &Path) -> Result<()> {
+async fn extract_video_frames_with_ffmpeg(
+    video_path: &Path,
+    output_dir: &Path,
+    canceled: &AtomicBool,
+) -> Result<()> {
     let frame_pattern = output_dir.join("frame_%04d.png");
-    let output = Command::new("ffmpeg")
+    let mut command = Command::new("ffmpeg");
+    command
         .arg("-y")
         .arg("-loglevel")
         .arg("error")
@@ -983,14 +999,13 @@ async fn extract_video_frames_with_ffmpeg(video_path: &Path, output_dir: &Path) 
         .arg(&frame_pattern)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "failed to launch ffmpeg for control video extraction from {}",
-                video_path.display()
-            )
-        })?;
+        .kill_on_drop(true);
+    let output = run_cancellable_output(command, canceled).await.with_context(|| {
+        format!(
+            "failed to launch ffmpeg for control video extraction from {}",
+            video_path.display()
+        )
+    })?;
 
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1037,11 +1052,16 @@ async fn ensure_sd_cli(diffuse_runtime_dir: &Path) -> Result<PathBuf> {
             detect_sdcpp_build_mode(diffuse_runtime_dir),
             Some(SdcppBuildMode::Vulkan)
         );
-        if !wants_vulkan || built_with_vulkan {
+        let source_changed = source_tree_newer_than_cli(diffuse_runtime_dir, &existing);
+        if (!wants_vulkan || built_with_vulkan) && !source_changed {
             return Ok(existing);
         }
     }
 
+    force_rebuild_sd_cli(diffuse_runtime_dir).await
+}
+
+async fn force_rebuild_sd_cli(diffuse_runtime_dir: &Path) -> Result<PathBuf> {
     if !diffuse_runtime_dir.join("CMakeLists.txt").exists() {
         bail!(
             "stable-diffusion.cpp source was not found in diffuse_runtime/. Add the extracted source tree there first."
@@ -1059,6 +1079,9 @@ async fn ensure_sd_cli(diffuse_runtime_dir: &Path) -> Result<PathBuf> {
     }
 
     let build_dir = diffuse_runtime_dir.join(BUILD_DIR_NAME);
+    if build_dir.exists() {
+        let _ = fs::remove_dir_all(&build_dir).await;
+    }
     let mut configure_args = vec![
         "-S".to_string(),
         diffuse_runtime_dir.display().to_string(),
@@ -1092,15 +1115,28 @@ async fn ensure_sd_cli(diffuse_runtime_dir: &Path) -> Result<PathBuf> {
     })
 }
 
-async fn run_sd_cli(cli_path: &Path, diffuse_runtime_dir: &Path, args: &[String]) -> Result<()> {
-    let output = Command::new(cli_path)
-        .args(args)
-        .current_dir(diffuse_runtime_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .with_context(|| format!("failed to launch {}", cli_path.display()))?;
+async fn run_sd_cli(
+    cli_path: &Path,
+    diffuse_runtime_dir: &Path,
+    args: &[String],
+    canceled: &AtomicBool,
+) -> Result<()> {
+    let output = match launch_sd_cli_once(cli_path, diffuse_runtime_dir, args, canceled).await {
+        Ok(output) => output,
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|io_error| io_error.kind() == io::ErrorKind::NotFound) =>
+        {
+            let build_dir = diffuse_runtime_dir.join(BUILD_DIR_NAME);
+            let _ = fs::remove_dir_all(&build_dir).await;
+            let rebuilt_cli = force_rebuild_sd_cli(diffuse_runtime_dir).await?;
+            launch_sd_cli_once(&rebuilt_cli, diffuse_runtime_dir, args, canceled)
+                .await
+                .with_context(|| format!("failed to relaunch {}", rebuilt_cli.display()))?
+        }
+        Err(error) => return Err(error),
+    };
 
     if output.status.success() {
         return Ok(());
@@ -1117,6 +1153,45 @@ async fn run_sd_cli(cli_path: &Path, diffuse_runtime_dir: &Path, args: &[String]
         summarize_output("stdout", &stdout),
         summarize_output("stderr", &stderr)
     );
+}
+
+async fn launch_sd_cli_once(
+    cli_path: &Path,
+    diffuse_runtime_dir: &Path,
+    args: &[String],
+    canceled: &AtomicBool,
+) -> Result<std::process::Output> {
+    let mut command = Command::new(cli_path);
+    command
+        .args(args)
+        .current_dir(diffuse_runtime_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    run_cancellable_output(command, canceled)
+        .await
+        .with_context(|| format!("failed to launch {}", cli_path.display()))
+}
+
+async fn run_cancellable_output(
+    mut command: Command,
+    canceled: &AtomicBool,
+) -> Result<std::process::Output> {
+    let output_future = command.output();
+    tokio::pin!(output_future);
+
+    loop {
+        tokio::select! {
+            output = &mut output_future => {
+                return output.context("failed to wait for local process output");
+            }
+            _ = sleep(Duration::from_millis(150)) => {
+                if canceled.load(Ordering::SeqCst) {
+                    bail!("Generation canceled.");
+                }
+            }
+        }
+    }
 }
 
 async fn run_build_command(program: &str, args: &[String]) -> Result<()> {
@@ -1151,6 +1226,47 @@ fn find_sd_cli(diffuse_runtime_dir: &Path) -> Option<PathBuf> {
     ];
 
     candidates.into_iter().find(|path| path.exists())
+}
+
+fn source_tree_newer_than_cli(diffuse_runtime_dir: &Path, cli_path: &Path) -> bool {
+    let cli_modified = cli_path
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    for entry in WalkDir::new(diffuse_runtime_dir)
+        .into_iter()
+        .filter_entry(|entry| {
+            let name = entry.file_name().to_string_lossy();
+            if entry.depth() == 0 {
+                return true;
+            }
+            if entry.file_type().is_dir() && (name.eq_ignore_ascii_case(BUILD_DIR_NAME) || name == ".git") {
+                return false;
+            }
+            true
+        })
+        .filter_map(|entry| entry.ok())
+    {
+        let Ok(relative) = entry.path().strip_prefix(diffuse_runtime_dir) else {
+            continue;
+        };
+        if relative.components().next().is_some_and(|component| component.as_os_str() == BUILD_DIR_NAME) {
+            continue;
+        }
+
+        let modified = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if modified > cli_modified {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn primary_model_flag(family: &RuntimeFamily) -> &'static str {
@@ -1209,6 +1325,28 @@ fn detect_runtime_recipe(
 ) -> Option<RuntimeRecipe> {
     let lower = file_name.to_ascii_lowercase();
     let gguf = inspect_gguf(model_path);
+
+    if is_wan_high_noise_companion_name(&lower) {
+        let low_noise_pair = find_high_noise_pair(model_path);
+        let mut missing = vec![
+            "This Wan2.2 high-noise GGUF is a companion diffusion file, not the primary dropdown choice.".to_string(),
+        ];
+        if low_noise_pair.is_none() {
+            missing.push(
+                "matching Wan2.2 low-noise GGUF partner".to_string(),
+            );
+        }
+        let mut recipe = base_recipe(diffuse_runtime_dir, RuntimeFamily::Wan, model_path);
+        recipe.supported_kinds = vec![MediaKind::Image, MediaKind::Gif, MediaKind::Video];
+        recipe.missing = missing.clone();
+        recipe.compatibility_note = recipe_note(
+            diffuse_runtime_dir,
+            "Wan GGUF Companion",
+            "This Wan2.2 A14B high-noise file stays in models/ as the companion diffusion weight. Select the matching low-noise GGUF to run the paired Wan2.2 path, and Chatty-art will attach this high-noise file automatically.",
+            &missing,
+        );
+        return Some(recipe);
+    }
 
     if is_unsupported_motion_diffusion(&lower, gguf.as_ref()) {
         let missing = vec!["This checkpoint looks like an animation or motion-diffusion variant that Chatty-art's current stable-diffusion.cpp path does not support yet.".to_string()];
@@ -1585,14 +1723,10 @@ fn detect_runtime_recipe(
         let supports_end_image_reference = wan_supports_end_image_reference(variant);
         let supports_video_reference = wan_supports_video_reference(variant);
         let (resolved_model_path, high_noise, pair_note) =
-            resolve_wan_model_paths(models_dir, model_path, &lower);
+            resolve_wan_model_paths(models_dir, model_path, &lower, variant);
+        let pair_quant_mismatch = wan_pair_quant_mismatch(&resolved_model_path, high_noise.as_deref());
 
-        let vae = if matches!(variant, WanVariant::Ti2v) {
-            find_first_file(models_dir, &["wan2.2_vae"], &["safetensors"])
-                .or_else(|| find_first_file(models_dir, &["wan_2.1_vae"], &["safetensors"]))
-        } else {
-            find_first_file(models_dir, &["wan_2.1_vae", "wan2.2_vae"], &["safetensors"])
-        };
+        let vae = resolve_wan_vae_path(models_dir, &lower, variant);
         let t5 = find_first_file(models_dir, &["umt5"], &["gguf", "safetensors"])
             .or_else(|| find_first_file(models_dir, &["t5xxl"], &["gguf", "safetensors"]));
         let clip_vision = if needs_clip_vision {
@@ -1604,7 +1738,7 @@ fn detect_runtime_recipe(
         } else {
             None
         };
-        let missing = missing_components(&[
+        let mut missing = missing_components(&[
             ("wan vae (.safetensors)", vae.as_deref()),
             (
                 "umt5 / t5xxl text encoder (.gguf or .safetensors)",
@@ -1627,6 +1761,12 @@ fn detect_runtime_recipe(
                 },
             ),
         ]);
+        if pair_quant_mismatch {
+            missing.push(
+                "matching Wan2.2 low-noise / high-noise quantization (for example both Q4_K_M)"
+                    .to_string(),
+            );
+        }
 
         let mut note = format!(
             "{} runs locally through stable-diffusion.cpp for image and video jobs. Add the Wan VAE and the UMT5/T5 text encoder into models/ to enable it.",
@@ -1634,6 +1774,11 @@ fn detect_runtime_recipe(
         );
         if matches!(variant, WanVariant::Flf2v) {
             note.push_str(" FLF2V uses both a start image and an end image from the Input Tray.");
+        }
+        if matches!(variant, WanVariant::Ti2v) {
+            note.push_str(
+                " Wan2.2 TI2V 5B is the simpler hybrid Wan2.2 path here: one main GGUF can handle both text-to-video and image-to-video, and it uses the Wan2.2 VAE rather than the paired high-noise/low-noise A14B setup.",
+            );
         }
         if matches!(variant, WanVariant::Vace) {
             note.push_str(
@@ -1646,6 +1791,11 @@ fn detect_runtime_recipe(
         if wan_needs_high_noise_pair(&lower, variant) {
             note.push_str(
                 " Wan2.2 A14B-style models also expect matching HighNoise and LowNoise diffusion files.",
+            );
+        }
+        if pair_quant_mismatch {
+            note.push_str(
+                " The paired Wan2.2 files should use the same quantization suffix, such as both Q4_K_M or both Q5_K_M.",
             );
         }
         if let Some(pair_note) = pair_note.as_deref() {
@@ -2218,10 +2368,60 @@ fn wan_needs_high_noise_pair(lower_name: &str, variant: WanVariant) -> bool {
     lower_name.contains("wan2.2") && !matches!(variant, WanVariant::Ti2v | WanVariant::Vace)
 }
 
+fn resolve_wan_vae_path(
+    models_dir: &Path,
+    lower_name: &str,
+    variant: WanVariant,
+) -> Option<PathBuf> {
+    if matches!(variant, WanVariant::Ti2v) {
+        return find_first_file(models_dir, &["wan2.2_vae"], &["safetensors"])
+            .or_else(|| find_first_file(models_dir, &["wan_2.1_vae"], &["safetensors"]));
+    }
+
+    if lower_name.contains("wan2.2") {
+        return find_first_file(models_dir, &["wan2.2_vae"], &["safetensors"])
+            .or_else(|| find_first_file(models_dir, &["wan_2.1_vae"], &["safetensors"]));
+    }
+
+    find_first_file(models_dir, &["wan_2.1_vae"], &["safetensors"])
+        .or_else(|| find_first_file(models_dir, &["wan2.2_vae"], &["safetensors"]))
+}
+
+fn wan_pair_quant_mismatch(low_noise: &Path, high_noise: Option<&Path>) -> bool {
+    let Some(high_noise) = high_noise else {
+        return false;
+    };
+    let Some(low_quant) = extract_gguf_quant_suffix(low_noise) else {
+        return false;
+    };
+    let Some(high_quant) = extract_gguf_quant_suffix(high_noise) else {
+        return false;
+    };
+    low_quant != high_quant
+}
+
+fn extract_gguf_quant_suffix(path: &Path) -> Option<String> {
+    let lower = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let without_ext = lower.strip_suffix(".gguf").unwrap_or(&lower);
+    without_ext
+        .rfind("-q")
+        .map(|index| without_ext[index + 1..].to_string())
+        .or_else(|| {
+            without_ext
+                .rfind("_q")
+                .map(|index| without_ext[index + 1..].replace('-', "_"))
+        })
+}
+
 fn resolve_wan_model_paths(
     models_dir: &Path,
     model_path: &Path,
     lower_name: &str,
+    variant: WanVariant,
 ) -> (PathBuf, Option<PathBuf>, Option<String>) {
     let file_name = model_path
         .file_name()
@@ -2247,10 +2447,11 @@ fn resolve_wan_model_paths(
         }
     }
 
-    if lower_name.contains("wan2.2")
+    if !matches!(variant, WanVariant::Ti2v)
+        && (lower_name.contains("wan2.2")
         || lower_name.contains("animate")
         || lower_name.contains("fun")
-        || lower_name.contains("control")
+        || lower_name.contains("control"))
     {
         if let Some((low_noise, high_noise)) = find_any_wan_noise_pair(models_dir) {
             return (
@@ -2412,7 +2613,7 @@ fn find_high_noise_pair(model_path: &Path) -> Option<PathBuf> {
     let parent = model_path.parent()?;
     let entries = std::fs::read_dir(parent).ok()?;
 
-    if file_name.contains("highnoise") {
+    if file_name.contains("highnoise") || file_name.contains("high_noise") {
         return entries.flatten().find_map(|entry| {
             let path = entry.path();
             let lower = path
@@ -2420,7 +2621,7 @@ fn find_high_noise_pair(model_path: &Path) -> Option<PathBuf> {
                 .and_then(|value| value.to_str())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            if lower.contains("lownoise") {
+            if lower.contains("lownoise") || lower.contains("low_noise") {
                 Some(path)
             } else {
                 None
@@ -2428,7 +2629,7 @@ fn find_high_noise_pair(model_path: &Path) -> Option<PathBuf> {
         });
     }
 
-    if file_name.contains("lownoise") {
+    if file_name.contains("lownoise") || file_name.contains("low_noise") {
         return entries.flatten().find_map(|entry| {
             let path = entry.path();
             let lower = path
@@ -2436,7 +2637,7 @@ fn find_high_noise_pair(model_path: &Path) -> Option<PathBuf> {
                 .and_then(|value| value.to_str())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            if lower.contains("highnoise") {
+            if lower.contains("highnoise") || lower.contains("high_noise") {
                 Some(path)
             } else {
                 None
@@ -2445,6 +2646,11 @@ fn find_high_noise_pair(model_path: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+fn is_wan_high_noise_companion_name(lower_name: &str) -> bool {
+    (lower_name.contains("wan2.2") || lower_name.contains("a14b"))
+        && (lower_name.contains("highnoise") || lower_name.contains("high_noise"))
 }
 
 fn missing_components(items: &[(&str, Option<&Path>)]) -> Vec<String> {
@@ -2571,6 +2777,17 @@ fn explain_sdcpp_failure(stdout: &str, stderr: &str) -> Option<&'static str> {
         );
     }
 
+    if (combined.contains("wan2.2") || combined.contains("wan 2.x") || combined.contains("wan2.x"))
+        && (combined.contains("patch_embedding.weight")
+            || combined.contains("invalid number of dimensions")
+            || combined.contains("failed to read tensor info")
+            || combined.contains("load tensors from model loader failed"))
+    {
+        return Some(
+            "This Wan2.2 GGUF pair was found, but the current stable-diffusion.cpp loader does not like this particular conversion layout. This looks like a loader/conversion compatibility problem, not a prompt issue and not a normal VRAM OOM. Try a newer stable-diffusion.cpp build first, then a different Wan2.2 GGUF conversion line if it still fails.",
+        );
+    }
+
     if combined.contains("wrong shape in model file")
         || combined.contains("invalid number of dimensions")
         || combined.contains("unknown tensor")
@@ -2694,6 +2911,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_prompt_model: None,
+            selected_vision_model: None,
             selected_lora: None,
             selected_lora_weight: None,
             selected_loras: Vec::new(),
@@ -2706,6 +2925,9 @@ mod tests {
             audio_segments: Vec::new(),
             manual_focus_tags: Vec::new(),
             manual_assumptions: Vec::new(),
+            manual_preserve_items: Vec::new(),
+            manual_change_targets: Vec::new(),
+            manual_avoid_items: Vec::new(),
         }
     }
 
@@ -3401,6 +3623,154 @@ mod tests {
             support.compatibility_note.contains("Missing:")
                 || support.compatibility_note.contains("enable it"),
             "{support:?}"
+        );
+    }
+
+    #[test]
+    fn wan22_ti2v_5b_stays_on_single_model_even_if_a14b_pair_exists() {
+        let diffuse_dir = ready_diffuse_dir("diffuse-wan22-ti2v");
+        let models_dir = temp_dir("models-wan22-ti2v");
+        fs::write(models_dir.join("Wan2.2-TI2V-5B-Q4_K_M.gguf"), b"").unwrap();
+        fs::write(
+            models_dir.join("wan2.2_t2v_low_noise_A14B_q4_k_m.gguf"),
+            b"",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("wan2.2_t2v_high_noise_A14B_q4_k_m.gguf"),
+            b"",
+        )
+        .unwrap();
+        fs::write(models_dir.join("Wan2.2_VAE.safetensors"), b"").unwrap();
+        fs::write(models_dir.join("umt5-xxl-encoder-Q4_K_M.gguf"), b"").unwrap();
+
+        let recipe = detect_runtime_recipe(
+            &diffuse_dir,
+            &models_dir,
+            &models_dir.join("Wan2.2-TI2V-5B-Q4_K_M.gguf"),
+            "Wan2.2-TI2V-5B-Q4_K_M.gguf",
+        )
+        .unwrap();
+
+        assert_eq!(
+            recipe.model_path.file_name().and_then(|value| value.to_str()),
+            Some("Wan2.2-TI2V-5B-Q4_K_M.gguf")
+        );
+        assert!(recipe.high_noise_model_path.is_none(), "{recipe:?}");
+        assert!(recipe.runtime_supported(), "{recipe:?}");
+        assert!(recipe.supports_image_reference, "{recipe:?}");
+        assert!(!recipe.requires_reference, "{recipe:?}");
+    }
+
+    #[test]
+    fn wan22_a14b_prefers_wan22_vae_over_wan21_vae() {
+        let diffuse_dir = ready_diffuse_dir("diffuse-wan22-a14b");
+        let models_dir = temp_dir("models-wan22-a14b");
+        fs::write(
+            models_dir.join("wan2.2-t2v-lownoise-A14B-q4_k_m.gguf"),
+            b"",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("wan2.2-t2v-highnoise-A14B-q4_k_m.gguf"),
+            b"",
+        )
+        .unwrap();
+        fs::write(models_dir.join("wan_2.1_vae.safetensors"), b"").unwrap();
+        fs::write(models_dir.join("Wan2.2_VAE.safetensors"), b"").unwrap();
+        fs::write(models_dir.join("umt5-xxl-encoder-Q4_K_M.gguf"), b"").unwrap();
+
+        let recipe = detect_runtime_recipe(
+            &diffuse_dir,
+            &models_dir,
+            &models_dir.join("wan2.2-t2v-lownoise-A14B-q4_k_m.gguf"),
+            "wan2.2-t2v-lownoise-A14B-q4_k_m.gguf",
+        )
+        .unwrap();
+
+        assert_eq!(
+            recipe.vae_path.as_ref().and_then(|path| path.file_name()).and_then(|value| value.to_str()),
+            Some("Wan2.2_VAE.safetensors")
+        );
+        assert!(recipe.high_noise_model_path.is_some(), "{recipe:?}");
+        assert!(recipe.runtime_supported(), "{recipe:?}");
+    }
+
+    #[test]
+    fn wan22_a14b_requires_matching_quant_suffixes() {
+        let diffuse_dir = ready_diffuse_dir("diffuse-wan22-a14b-quant");
+        let models_dir = temp_dir("models-wan22-a14b-quant");
+        fs::write(
+            models_dir.join("wan2.2-t2v-lownoise-A14B-q4_k_m.gguf"),
+            b"",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("wan2.2-t2v-highnoise-A14B-q8_0.gguf"),
+            b"",
+        )
+        .unwrap();
+        fs::write(models_dir.join("Wan2.2_VAE.safetensors"), b"").unwrap();
+        fs::write(models_dir.join("umt5-xxl-encoder-Q4_K_M.gguf"), b"").unwrap();
+
+        let support = detect_sdcpp_support(
+            &diffuse_dir,
+            &models_dir,
+            "wan2.2-t2v-lownoise-A14B-q4_k_m.gguf",
+            "wan2.2-t2v-lownoise-A14B-q4_k_m.gguf",
+        )
+        .unwrap();
+
+        assert!(!support.runtime_supported, "{support:?}");
+        assert!(
+            support.compatibility_note.contains("same quantization suffix")
+                || support.compatibility_note.contains("matching Wan2.2 low-noise / high-noise quantization"),
+            "{support:?}"
+        );
+    }
+
+    #[test]
+    fn wan22_high_noise_companion_is_not_presented_as_primary_model() {
+        let diffuse_dir = ready_diffuse_dir("diffuse-wan22-highnoise");
+        let models_dir = temp_dir("models-wan22-highnoise");
+        fs::write(
+            models_dir.join("wan2.2-t2v-lownoise-A14B-q4_k_m.gguf"),
+            b"",
+        )
+        .unwrap();
+        fs::write(
+            models_dir.join("wan2.2-t2v-highnoise-A14B-q4_k_m.gguf"),
+            b"",
+        )
+        .unwrap();
+
+        let support = detect_sdcpp_support(
+            &diffuse_dir,
+            &models_dir,
+            "wan2.2-t2v-highnoise-A14B-q4_k_m.gguf",
+            "wan2.2-t2v-highnoise-A14B-q4_k_m.gguf",
+        )
+        .unwrap();
+
+        assert!(!support.runtime_supported, "{support:?}");
+        assert!(
+            support.compatibility_note.contains("companion diffusion weight")
+                || support.compatibility_note.contains("not the primary dropdown choice"),
+            "{support:?}"
+        );
+    }
+
+    #[test]
+    fn explain_wan22_loader_layout_failure_before_generic_shape_mismatch() {
+        let friendly = explain_sdcpp_failure(
+            "[INFO ] wan.hpp:2218 - Wan2.x-T2V-14B\n[ERROR] ggml_extend.hpp:84 - gguf_init_from_file_impl: tensor 'patch_embedding.weight' has invalid number of dimensions: 5 > 4",
+            "[ERROR] stable-diffusion.cpp:1200 - load tensors from model loader failed",
+        );
+
+        assert!(friendly.is_some());
+        assert!(
+            friendly.unwrap().contains("loader/conversion compatibility problem"),
+            "{friendly:?}"
         );
     }
 

@@ -17,13 +17,27 @@ const state = {
   currentBatchCompleted: 0,
   activeFilter: "all",
   generating: false,
+  canceling: false,
   preparing: false,
   generationStyle: "expressive",
   workflowMode: "basic",
   audioSegments: [],
   loraSelections: [],
   preparedHandoff: null,
+  handoffTargets: [],
+  selectedOutputIds: new Set(),
+  handoffSending: false,
+  handoffStatusMessage: "",
+  loraInbox: {
+    loading: false,
+    importing: false,
+    assets: [],
+    selectedAssetIds: new Set(),
+    statusMessage: "",
+  },
 };
+
+let lastBridgeStatusFingerprint = "";
 
 const MAX_RUNTIME_SEED = 4294967295;
 const MODE_DEFAULTS = {
@@ -70,6 +84,12 @@ const elements = {
   manualFocusCuesInput: document.getElementById("manualFocusCuesInput"),
   manualAssumptionsBlock: document.getElementById("manualAssumptionsBlock"),
   manualAssumptionsInput: document.getElementById("manualAssumptionsInput"),
+  manualPreserveBlock: document.getElementById("manualPreserveBlock"),
+  manualPreserveInput: document.getElementById("manualPreserveInput"),
+  manualChangeBlock: document.getElementById("manualChangeBlock"),
+  manualChangeInput: document.getElementById("manualChangeInput"),
+  manualAvoidBlock: document.getElementById("manualAvoidBlock"),
+  manualAvoidInput: document.getElementById("manualAvoidInput"),
   audioSegmentsBlock: document.getElementById("audioSegmentsBlock"),
   audioSegmentsTitle: document.getElementById("audioSegmentsTitle"),
   audioSegmentsHelp: document.getElementById("audioSegmentsHelp"),
@@ -89,6 +109,9 @@ const elements = {
   preparedNegativeBlock: document.getElementById("preparedNegativeBlock"),
   preparedNegativeInput: document.getElementById("preparedNegativeInput"),
   preparedEstimate: document.getElementById("preparedEstimate"),
+  preparedVisionBlock: document.getElementById("preparedVisionBlock"),
+  preparedVisionTitle: document.getElementById("preparedVisionTitle"),
+  preparedVisionSummary: document.getElementById("preparedVisionSummary"),
   preparedFocusTags: document.getElementById("preparedFocusTags"),
   preparedAssumptions: document.getElementById("preparedAssumptions"),
   styleButtons: [...document.querySelectorAll("[data-style]")],
@@ -98,6 +121,12 @@ const elements = {
   runtimeBadges: document.getElementById("runtimeBadges"),
   modelSelect: document.getElementById("modelSelect"),
   modelSummary: document.getElementById("modelSummary"),
+  promptModelBlock: document.getElementById("promptModelBlock"),
+  promptModelSelect: document.getElementById("promptModelSelect"),
+  promptModelSummary: document.getElementById("promptModelSummary"),
+  visionModelBlock: document.getElementById("visionModelBlock"),
+  visionModelSelect: document.getElementById("visionModelSelect"),
+  visionModelSummary: document.getElementById("visionModelSummary"),
   temperatureCard: document.getElementById("temperatureCard"),
   temperatureInput: document.getElementById("temperatureInput"),
   temperatureValue: document.getElementById("temperatureValue"),
@@ -140,6 +169,7 @@ const elements = {
   promptAssistInput: document.getElementById("promptAssistInput"),
   batchCountInput: document.getElementById("batchCountInput"),
   batchCountCopy: document.getElementById("batchCountCopy"),
+  cancelGenerateButton: document.getElementById("cancelGenerateButton"),
   seedInput: document.getElementById("seedInput"),
   refreshAll: document.getElementById("refreshAll"),
   progressFill: document.getElementById("progressFill"),
@@ -158,6 +188,19 @@ const elements = {
   centerColumn: document.querySelector(".center-column"),
   inputAssetList: document.getElementById("inputAssetList"),
   outputAssetList: document.getElementById("outputAssetList"),
+  outputHandoffPanel: document.getElementById("outputHandoffPanel"),
+  outputHandoffSummary: document.getElementById("outputHandoffSummary"),
+  outputHandoffNote: document.getElementById("outputHandoffNote"),
+  outputHandoffPreview: document.getElementById("outputHandoffPreview"),
+  sendOutputsToLoraButton: document.getElementById("sendOutputsToLoraButton"),
+  sendOutputsToSandboxButton: document.getElementById("sendOutputsToSandboxButton"),
+  deleteSelectedOutputsButton: document.getElementById("deleteSelectedOutputsButton"),
+  loraInboxPanel: document.getElementById("loraInboxPanel"),
+  loraInboxSummary: document.getElementById("loraInboxSummary"),
+  loraInboxFamilySelect: document.getElementById("loraInboxFamilySelect"),
+  loraInboxList: document.getElementById("loraInboxList"),
+  importLoraInboxButton: document.getElementById("importLoraInboxButton"),
+  clearLoraInboxSelectionButton: document.getElementById("clearLoraInboxSelectionButton"),
   trayPreview: document.getElementById("trayPreview"),
   referenceGuide: document.getElementById("referenceGuide"),
   referenceEdit: document.getElementById("referenceEdit"),
@@ -234,14 +277,27 @@ elements.modelSelect.addEventListener("change", () => {
   renderStyleMode();
   renderPrepareKindOptions();
   renderModelSummary();
+  renderPromptModelSelector();
+  renderVisionModelSelector();
   refreshAudioSettingCopy();
   refreshBatchCountCopy();
   renderReferenceIntentControls();
   syncActionState();
 });
+elements.promptModelSelect.addEventListener("change", () => {
+  clearPreparedHandoff();
+  renderPromptModelSelector();
+  syncActionState();
+});
+elements.visionModelSelect.addEventListener("change", () => {
+  clearPreparedHandoff();
+  renderVisionModelSelector();
+  syncActionState();
+});
 elements.actionButtons.forEach((button) => {
   button.addEventListener("click", () => submitGeneration(button.dataset.kind));
 });
+elements.cancelGenerateButton.addEventListener("click", () => cancelCurrentGeneration());
 elements.trayFilters.forEach((button) => {
   button.addEventListener("click", () => {
     state.activeFilter = button.dataset.filter;
@@ -301,9 +357,21 @@ elements.audioLiteralPromptInput.addEventListener("input", () => clearPreparedHa
 elements.manualFocusCuesInput.addEventListener("input", () => clearPreparedHandoff());
 elements.manualAssumptionsInput.addEventListener("input", () => clearPreparedHandoff());
 elements.promptAssistInput.addEventListener("change", () => clearPreparedHandoff());
+elements.promptAssistInput.addEventListener("change", () => renderPromptModelSelector());
+elements.promptAssistInput.addEventListener("change", () => renderVisionModelSelector());
 elements.prepareKindInput.addEventListener("change", () => {
   clearPreparedHandoff();
   refreshBatchCountCopy();
+});
+elements.outputHandoffNote.addEventListener("input", () => renderOutputHandoffPanel());
+elements.sendOutputsToLoraButton.addEventListener("click", () => sendSelectedOutputsToLora());
+elements.sendOutputsToSandboxButton.addEventListener("click", () => sendSelectedOutputsToSandbox());
+elements.deleteSelectedOutputsButton.addEventListener("click", () => deleteSelectedOutputs());
+elements.loraInboxFamilySelect.addEventListener("change", () => renderLoraInboxPanel());
+elements.importLoraInboxButton.addEventListener("click", () => importSelectedLoraInboxAssets());
+elements.clearLoraInboxSelectionButton.addEventListener("click", () => {
+  state.loraInbox.selectedAssetIds.clear();
+  renderLoraInboxPanel();
 });
 elements.addAudioSegmentButton.addEventListener("click", () => {
   const model = getSelectedModel();
@@ -378,7 +446,14 @@ renderPrepareKindOptions();
 renderPreparedHandoff();
 refreshBatchCountCopy();
 refreshEverything();
+loadAvailableHandoffTargets();
+loadLoraInboxAssets();
 startGpuTelemetryPolling();
+syncChattyCogBridgeStatus();
+window.setInterval(syncChattyCogBridgeStatus, 2000);
+window.setInterval(() => {
+  loadLoraInboxAssets({ silent: true });
+}, 3000);
 
 async function refreshEverything() {
   await Promise.all([
@@ -389,6 +464,7 @@ async function refreshEverything() {
     loadAssets(),
     loadOutputs(),
     loadGpuTelemetry(),
+    loadAvailableHandoffTargets(),
   ]);
 }
 
@@ -1020,6 +1096,7 @@ async function loadAssets() {
   }
   reconcileAssignedAssets();
   renderAssets();
+  renderVisionModelSelector();
 }
 
 async function loadOutputs() {
@@ -1033,8 +1110,52 @@ async function loadOutputs() {
     state.currentPreview = state.outputs[0];
   }
 
+  pruneSelectedOutputs();
   renderPreview();
   renderHistory();
+}
+
+async function loadAvailableHandoffTargets() {
+  if (!window.chattyCogBridge?.available || typeof window.chattyCogBridge.getAvailableHandoffTargets !== "function") {
+    state.handoffTargets = [];
+    renderOutputHandoffPanel();
+    return;
+  }
+
+  try {
+    const payload = await window.chattyCogBridge.getAvailableHandoffTargets();
+    state.handoffTargets = Array.isArray(payload?.targets) ? payload.targets : [];
+  } catch {
+    state.handoffTargets = [];
+  }
+
+  renderOutputHandoffPanel();
+}
+
+async function loadLoraInboxAssets({ silent = false } = {}) {
+  if (!window.chattyCogBridge?.available || typeof window.chattyCogBridge.readIncomingAssets !== "function") {
+    state.loraInbox.assets = [];
+    state.loraInbox.selectedAssetIds.clear();
+    renderLoraInboxPanel();
+    return;
+  }
+
+  if (!silent) {
+    state.loraInbox.loading = true;
+    renderLoraInboxPanel();
+  }
+
+  try {
+    const assets = await window.chattyCogBridge.readIncomingAssets("lora_imports");
+    state.loraInbox.assets = Array.isArray(assets) ? assets : [];
+    pruneLoraInboxSelection();
+  } catch {
+    state.loraInbox.assets = [];
+    state.loraInbox.selectedAssetIds.clear();
+  } finally {
+    state.loraInbox.loading = false;
+    renderLoraInboxPanel();
+  }
 }
 
 function renderStyleMode() {
@@ -1053,6 +1174,7 @@ function renderStyleMode() {
     : "Expressive uses the bundled llama.cpp planner plus Chatty-art's local renderer for fast image, GIF, and audio output.";
   renderRuntimeBadges();
   refreshAudioSettingCopy();
+  renderVisionModelSelector();
 
   elements.negativePromptBlock.classList.toggle("hidden", !realism);
   renderAudioPromptInputs();
@@ -1102,6 +1224,9 @@ function renderManualPromptAssistInputs() {
   const show = supportsManualPromptAssistInputs();
   elements.manualFocusCuesBlock.classList.toggle("hidden", !show);
   elements.manualAssumptionsBlock.classList.toggle("hidden", !show);
+  elements.manualPreserveBlock.classList.toggle("hidden", !show);
+  elements.manualChangeBlock.classList.toggle("hidden", !show);
+  elements.manualAvoidBlock.classList.toggle("hidden", !show);
 }
 
 function supportsAdvancedRealismSettings(model = getSelectedModel()) {
@@ -1177,6 +1302,13 @@ function renderAdvancedRealismSettings() {
   elements.loraCard.classList.toggle("hidden", !showLora);
   elements.referenceStrengthCard.classList.toggle("hidden", !showReferenceStrength);
   elements.flowShiftCard.classList.toggle("hidden", !showFlowShift);
+  if (showLora) {
+    const familyKey = modelLoraFamilyKey(model);
+    if (familyKey) {
+      elements.loraInboxFamilySelect.value = familyKey;
+    }
+  }
+  renderLoraInboxPanel();
 
   if (showLora) {
     const compatibleLoras = getCompatibleLoras(model);
@@ -1210,6 +1342,161 @@ function renderAdvancedRealismSettings() {
   }
 
   refreshAdvancedRealismSettingCopy();
+}
+
+function renderLoraInboxPanel() {
+  const hasBridge = Boolean(window.chattyCogBridge?.available);
+  elements.loraInboxPanel.classList.toggle("hidden", !hasBridge);
+  if (!hasBridge) {
+    return;
+  }
+
+  const selectedCount = state.loraInbox.selectedAssetIds.size;
+  if (state.loraInbox.loading) {
+    elements.loraInboxSummary.textContent = "Checking ChattyCog for incoming LoRA files...";
+  } else if (!state.loraInbox.assets.length) {
+    elements.loraInboxSummary.textContent = "No LoRA handoffs are waiting right now.";
+  } else {
+    elements.loraInboxSummary.textContent = `${state.loraInbox.assets.length} LoRA handoff file${state.loraInbox.assets.length === 1 ? "" : "s"} waiting for explicit import into models/loras/${elements.loraInboxFamilySelect.value || "family"}/.`;
+  }
+
+  if (state.loraInbox.statusMessage) {
+    elements.loraInboxSummary.textContent = `${elements.loraInboxSummary.textContent} ${state.loraInbox.statusMessage}`;
+  }
+
+  elements.importLoraInboxButton.disabled =
+    state.loraInbox.importing || selectedCount === 0 || !elements.loraInboxFamilySelect.value;
+  elements.importLoraInboxButton.textContent = state.loraInbox.importing
+    ? "Importing..."
+    : `Import selected LoRAs${selectedCount ? ` (${selectedCount})` : ""}`;
+  elements.clearLoraInboxSelectionButton.disabled =
+    state.loraInbox.importing || selectedCount === 0;
+
+  if (!state.loraInbox.assets.length) {
+    elements.loraInboxList.innerHTML = `<div class="empty-state">No LoRA handoffs are waiting in this bridge lane.</div>`;
+    return;
+  }
+
+  elements.loraInboxList.innerHTML = state.loraInbox.assets
+    .map((asset) => {
+      const selected = state.loraInbox.selectedAssetIds.has(asset.asset_id);
+      return `
+        <article class="lora-inbox-item ${selected ? "selected" : ""}">
+          <label class="lora-inbox-select">
+            <input type="checkbox" data-lora-inbox-asset="${escapeAttribute(asset.asset_id)}" ${selected ? "checked" : ""}>
+            <span>${escapeHtml(asset.label || asset.file_name || asset.asset_id || "LoRA handoff")}</span>
+          </label>
+          <div class="lora-inbox-copy">
+            <strong>${escapeHtml(asset.file_name || asset.payload_file_name || asset.asset_id)}</strong>
+            <p>${escapeHtml(asset.summary || "LoRA file waiting for import.")}</p>
+            <div class="lora-inbox-meta">${renderLoraInboxMeta(asset)}</div>
+            <p class="lora-inbox-action-note">Import will copy this into <code>models/loras/${escapeHtml(elements.loraInboxFamilySelect.value || "family")}/</code>. The sending module keeps its original output.</p>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  elements.loraInboxList.querySelectorAll("[data-lora-inbox-asset]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const assetId = checkbox.dataset.loraInboxAsset;
+      if (!assetId) {
+        return;
+      }
+      if (checkbox.checked) {
+        state.loraInbox.selectedAssetIds.add(assetId);
+      } else {
+        state.loraInbox.selectedAssetIds.delete(assetId);
+      }
+      state.loraInbox.statusMessage = "";
+      renderLoraInboxPanel();
+    });
+  });
+}
+
+function renderLoraInboxMeta(asset) {
+  const chips = [];
+  const sender = String(asset.from_device_name || asset.from_device_id || "").trim();
+  const laneLabel = String(asset.lane_label || asset.lane_id || "lora_imports").trim();
+  const delivered = formatBridgeDeliveredTime(asset.delivered_at_unix_ms);
+  const byteLabel = Number.isFinite(Number(asset.byte_len)) && Number(asset.byte_len) > 0
+    ? `${formatOneDecimal(Number(asset.byte_len) / (1024 * 1024))} MB`
+    : "";
+  const contentType = String(asset.content_type || "").trim();
+
+  if (sender) {
+    chips.push(`From ${sender}`);
+  }
+  if (laneLabel) {
+    chips.push(`Lane ${laneLabel}`);
+  }
+  if (delivered) {
+    chips.push(`Delivered ${delivered}`);
+  }
+  if (byteLabel) {
+    chips.push(byteLabel);
+  }
+  if (contentType) {
+    chips.push(contentType);
+  }
+
+  return chips.length
+    ? chips.map((chip) => `<span class="runtime-pill">${escapeHtml(chip)}</span>`).join("")
+    : `<span class="runtime-pill">Bridge handoff</span>`;
+}
+
+function pruneLoraInboxSelection() {
+  const validIds = new Set(state.loraInbox.assets.map((asset) => asset.asset_id));
+  for (const assetId of [...state.loraInbox.selectedAssetIds]) {
+    if (!validIds.has(assetId)) {
+      state.loraInbox.selectedAssetIds.delete(assetId);
+    }
+  }
+}
+
+async function importSelectedLoraInboxAssets() {
+  const assetIds = [...state.loraInbox.selectedAssetIds];
+  const familyKey = elements.loraInboxFamilySelect.value;
+  if (!assetIds.length || !familyKey) {
+    renderLoraInboxPanel();
+    return;
+  }
+
+  state.loraInbox.importing = true;
+  state.loraInbox.statusMessage = "";
+  renderLoraInboxPanel();
+
+  try {
+    const response = await fetch("/api/loras/import-bridge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        lane_id: "lora_imports",
+        asset_ids: assetIds,
+        family_key: familyKey,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || `LoRA import failed with ${response.status}`);
+    }
+
+    if (typeof window.chattyCogBridge?.consumeIncomingAsset === "function") {
+      for (const assetId of assetIds) {
+        window.chattyCogBridge.consumeIncomingAsset("lora_imports", assetId);
+      }
+    }
+
+    state.loraInbox.selectedAssetIds.clear();
+    state.loraInbox.statusMessage = Array.isArray(payload.notes) ? payload.notes.join(" ") : "LoRA import complete.";
+    await loadLoras();
+    await loadLoraInboxAssets({ silent: true });
+  } catch (error) {
+    state.loraInbox.statusMessage = `Could not import bridge LoRAs yet: ${String(error.message || error)}`;
+  } finally {
+    state.loraInbox.importing = false;
+    renderLoraInboxPanel();
+  }
 }
 
 function renderRuntimeBadges() {
@@ -1325,6 +1612,8 @@ function renderModels() {
     elements.modelSelect.disabled = true;
     renderStyleMode();
     renderModelNotice("Drop one or more GGUF models or supported local model packages into models/ and press Refresh Files.");
+    renderPromptModelSelector();
+    renderVisionModelSelector();
     renderPrepareKindOptions();
     renderPreparedHandoff();
     renderReferenceIntentControls();
@@ -1342,6 +1631,8 @@ function renderModels() {
         ? "Realism mode needs diffusion-style GGUFs or supported local model packages, plus any companion weights they require in models/. Switch to Expressive to use regular llama.cpp models."
         : "Expressive mode uses regular llama.cpp-compatible models. Switch to Realism for diffusion/video GGUFs."
     );
+    renderPromptModelSelector();
+    renderVisionModelSelector();
     renderPrepareKindOptions();
     renderPreparedHandoff();
     renderReferenceIntentControls();
@@ -1364,6 +1655,8 @@ function renderModels() {
     }
     renderStyleMode();
     renderModelSummary(hiddenModeCount);
+    renderPromptModelSelector();
+    renderVisionModelSelector();
     renderPrepareKindOptions();
     renderPreparedHandoff();
     renderReferenceIntentControls();
@@ -1392,6 +1685,8 @@ function renderModels() {
   normalizeAssignedReferencesForCurrentModel();
   renderStyleMode();
   renderModelSummary(hiddenModeCount);
+  renderPromptModelSelector();
+  renderVisionModelSelector();
   renderPrepareKindOptions();
   renderPreparedHandoff();
   renderReferenceIntentControls();
@@ -1425,7 +1720,7 @@ function renderModelSummary(hiddenModeCount = null) {
     const invisibleCount = hiddenModeCount ?? state.models.filter((entry) => entry.generation_style !== state.generationStyle).length;
     renderModelNotice(
       invisibleCount > 0
-        ? `No compatible ${state.generationStyle} model selected. ${invisibleCount} file(s) belong to the other mode.`
+        ? `No compatible ${state.generationStyle} model selected. ${invisibleCount} file(s) are hidden from this generator picker right now.`
         : `No compatible ${state.generationStyle} model selected.`,
       invisibleCount
     );
@@ -1467,6 +1762,15 @@ function renderModelSummary(hiddenModeCount = null) {
   if (model.supports_audio_reference) {
     badges.push(createModelBadge("Audio refs optional", "reference"));
   }
+  const compatibilityNote = String(model.compatibility_note || "").toLowerCase();
+  if (compatibilityNote.includes("clip_vision_h")) {
+    badges.push(
+      createModelBadge(
+        model.requires_reference ? "Clip Vision needed" : "Clip Vision for I2V",
+        "reference"
+      )
+    );
+  }
   const selectedLoras = getSelectedLoraDetails(model);
   if (supportsLoraControl(model) && selectedLoras.length) {
     badges.push(
@@ -1480,8 +1784,9 @@ function renderModelSummary(hiddenModeCount = null) {
   }
 
   const hiddenNote = invisibleCount > 0
-    ? `<div class="model-summary-foot">${escapeHtml(`${invisibleCount} file(s) belong to the other mode and are hidden right now.`)}</div>`
+    ? `<div class="model-summary-foot">${escapeHtml(`${invisibleCount} file(s) are hidden from this generator picker right now.`)}</div>`
     : "";
+  const runtimeLine = buildExplicitRuntimeLine(model);
   const recommendations = buildRecommendedLimitsMarkup(model);
 
   elements.modelSummary.innerHTML = `
@@ -1490,12 +1795,43 @@ function renderModelSummary(hiddenModeCount = null) {
         <strong class="model-summary-name">${escapeHtml(model.name)}</strong>
       </div>
       <div class="model-badges">${badges.join("")}</div>
+      ${runtimeLine ? `<div class="model-summary-runtime">${escapeHtml(runtimeLine)}</div>` : ""}
       <div class="model-summary-copy">${escapeHtml(model.compatibility_note)}</div>
       ${recommendations}
       ${hiddenNote}
     </div>
   `;
   refreshAudioSettingCopy();
+}
+
+function buildExplicitRuntimeLine(model) {
+  if (!model) {
+    return "";
+  }
+
+  const runtime = state.runtimeStatus
+    ? (model.generation_style === "realism" ? state.runtimeStatus.realism : state.runtimeStatus.expressive)
+    : null;
+
+  if (model.backend === "stable_diffusion_cpp") {
+    if (!runtime) {
+      return "Realism backend: stable-diffusion.cpp";
+    }
+    return `Realism backend: stable-diffusion.cpp ${runtime.label} build`;
+  }
+
+  if (model.backend === "audio_runtime") {
+    return "Realism backend: specialist local audio runtime";
+  }
+
+  if (model.backend === "llama_cpp") {
+    if (!runtime) {
+      return "Expressive backend: llama.cpp local runtime";
+    }
+    return `Expressive backend: llama.cpp ${runtime.label} runtime`;
+  }
+
+  return "";
 }
 
 function buildRecommendedLimitsMarkup(model) {
@@ -2340,6 +2676,8 @@ function renderPreview() {
 }
 
 function renderHistory() {
+  renderOutputHandoffPanel();
+
   if (!state.outputs.length) {
     elements.historyGrid.innerHTML = `<div class="history-card"><div class="history-copy"><strong>No saved outputs yet</strong><span>Generated files will appear here as soon as the first job finishes.</span></div></div>`;
     return;
@@ -2348,9 +2686,16 @@ function renderHistory() {
   elements.historyGrid.innerHTML = state.outputs
     .map((output) => {
       const preview = createHistoryPreview(output);
+      const selected = state.selectedOutputIds.has(output.id);
       return `
-        <div class="history-card">
-          <button type="button" data-output-id="${escapeHtml(output.id)}">
+        <div class="history-card ${selected ? "selected" : ""}">
+          <div class="history-card-header">
+            <label class="history-select">
+              <input type="checkbox" data-output-select="${escapeHtml(output.id)}" ${selected ? "checked" : ""}>
+              <span>Select</span>
+            </label>
+          </div>
+          <button class="history-preview-button" type="button" data-output-id="${escapeHtml(output.id)}">
             ${preview}
             <div class="history-copy">
               <strong>${escapeHtml(output.file_name)}</strong>
@@ -2371,6 +2716,311 @@ function renderHistory() {
       }
     });
   });
+
+  elements.historyGrid.querySelectorAll("[data-output-select]").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      toggleOutputSelection(checkbox.dataset.outputSelect, checkbox.checked);
+    });
+  });
+}
+
+function renderOutputHandoffPanel() {
+  const sandboxTarget = getSandboxHandoffTarget();
+  const loraTarget = getLoraHandoffTarget();
+  const selectedOutputs = getSelectedOutputs();
+  const selectedCount = selectedOutputs.length;
+  const hasBridge = Boolean(window.chattyCogBridge?.available);
+
+  elements.outputHandoffPanel.classList.toggle("hidden", !state.outputs.length);
+  if (!state.outputs.length) {
+    return;
+  }
+
+  let summary = "Select one or more saved outputs to share a copy through ChattyCog.";
+  if (sandboxTarget?.supported) {
+    summary = selectedCount
+      ? `${selectedCount} output${selectedCount === 1 ? "" : "s"} selected. ChattyCog will copy them into the sandbox handoff tray and keep the originals here in Chatty-art.`
+      : "Select one or more saved outputs to share a copy through ChattyCog.";
+  } else if (sandboxTarget?.note) {
+    summary = sandboxTarget.note;
+  } else {
+    summary = "ChattyCog Sandbox is not available in this hosting context yet.";
+  }
+
+  if (state.handoffStatusMessage) {
+    summary = `${summary} ${state.handoffStatusMessage}`;
+  }
+
+  elements.outputHandoffSummary.textContent = summary;
+  elements.sendOutputsToLoraButton.disabled = !loraTarget?.supported || !selectedCount || state.handoffSending;
+  elements.sendOutputsToLoraButton.textContent = state.handoffSending
+    ? "Sending to Chatty-lora..."
+    : `Send Selected to Chatty-lora${selectedCount ? ` (${selectedCount})` : ""}`;
+  elements.sendOutputsToSandboxButton.disabled = !sandboxTarget?.supported || !selectedCount || state.handoffSending;
+  elements.sendOutputsToSandboxButton.textContent = state.handoffSending
+    ? "Sending to ChattyCog Sandbox..."
+    : `Send Selected to ChattyCog Sandbox${selectedCount ? ` (${selectedCount})` : ""}`;
+  elements.deleteSelectedOutputsButton.disabled = !selectedCount || state.handoffSending;
+  elements.deleteSelectedOutputsButton.textContent = state.handoffSending
+    ? "Working..."
+    : `Delete Selected${selectedCount ? ` (${selectedCount})` : ""}`;
+  renderOutputHandoffPreview(selectedOutputs, sandboxTarget, loraTarget);
+}
+
+function renderOutputHandoffPreview(selectedOutputs, sandboxTarget, loraTarget) {
+  if (!elements.outputHandoffPreview) {
+    return;
+  }
+
+  if (!selectedOutputs.length) {
+    elements.outputHandoffPreview.innerHTML = `<div class="empty-state compact">Select one or more outputs to preview the mediated handoff details.</div>`;
+    return;
+  }
+
+  const first = selectedOutputs[0];
+  const note = String(elements.outputHandoffNote?.value || "").trim();
+  const tags = buildOutputHandoffTags(first).slice(0, 6);
+  const readyTargets = [loraTarget, sandboxTarget].filter((target) => target?.supported);
+  const targetText = readyTargets.length
+    ? readyTargets.map((target) => escapeHtml(`${target.label} via ${target.kind === "module" ? "dataset_candidates" : "sandbox"}`)).join(" or ")
+    : "No approved handoff targets are available right now.";
+  const previewLines = [
+    `<strong>${escapeHtml(`${selectedOutputs.length} output${selectedOutputs.length === 1 ? "" : "s"} queued for mediated copy handoff`)}</strong>`,
+    `<p>${escapeHtml(hasBridgeRouteSummary(readyTargets.length))}</p>`,
+    `<div class="output-handoff-meta">
+      <span class="runtime-pill">Source chatty_art</span>
+      <span class="runtime-pill">${escapeHtml(`${selectedOutputs.length} file${selectedOutputs.length === 1 ? "" : "s"}`)}</span>
+      <span class="runtime-pill">${escapeHtml(first.kind || "media output")}</span>
+      ${first.model ? `<span class="runtime-pill">${escapeHtml(first.model)}</span>` : ""}
+    </div>`,
+    `<p>${escapeHtml(`Available route: ${readyTargets.length ? readyTargets.map((target) => target.label).join(" or ") : "none"}.`)}</p>`,
+    `<p>${escapeHtml(`First item summary: ${buildOutputHandoffSummary(first)}`)}</p>`,
+    tags.length ? `<div class="output-handoff-meta">${tags.map((tag) => `<span class="runtime-pill">${escapeHtml(tag)}</span>`).join("")}</div>` : "",
+    note ? `<p>${escapeHtml(`User note to include: ${note}`)}</p>` : `<p>No extra user note will be attached unless you add one above.</p>`,
+    `<p>${targetText}</p>`,
+  ].filter(Boolean);
+
+  elements.outputHandoffPreview.innerHTML = previewLines.join("");
+}
+
+function hasBridgeRouteSummary(readyTargetCount) {
+  if (readyTargetCount > 0) {
+    return "ChattyCog will keep the originals in Chatty-art, attach lightweight context metadata, and route copies only to approved targets.";
+  }
+  return "Selection also powers local cleanup here. You can still delete saved outputs even when no ChattyCog handoff targets are available.";
+}
+
+function toggleOutputSelection(outputId, checked) {
+  if (!outputId) {
+    return;
+  }
+
+  if (checked) {
+    state.selectedOutputIds.add(outputId);
+  } else {
+    state.selectedOutputIds.delete(outputId);
+  }
+
+  state.handoffStatusMessage = "";
+  renderHistory();
+}
+
+function pruneSelectedOutputs() {
+  const validIds = new Set(state.outputs.map((output) => output.id));
+  for (const outputId of [...state.selectedOutputIds]) {
+    if (!validIds.has(outputId)) {
+      state.selectedOutputIds.delete(outputId);
+    }
+  }
+}
+
+function getSandboxHandoffTarget() {
+  return state.handoffTargets.find((target) => target.target_id === "chattycog_sandbox") || null;
+}
+
+function getLoraHandoffTarget() {
+  return state.handoffTargets.find((target) => target.target_id === "chatty_lora") || null;
+}
+
+function getSelectedOutputs() {
+  return state.outputs.filter((output) => state.selectedOutputIds.has(output.id));
+}
+
+function buildOutputHandoffSummary(output) {
+  const parts = [
+    output.prompt ? `Prompt: ${output.prompt}` : "",
+    output.model ? `Model: ${output.model}` : "",
+    output.kind ? `Kind: ${output.kind}` : "",
+    output.relative_path ? `Path: ${output.relative_path}` : "",
+  ].filter(Boolean);
+  return parts.join(" | ") || "Saved Chatty-art output.";
+}
+
+function buildOutputHandoffTags(output) {
+  const tags = ["chatty-art", "generated-output"];
+  if (output.kind) {
+    tags.push(`kind:${String(output.kind).toLowerCase()}`);
+  }
+  if (output.model) {
+    const lower = String(output.model).toLowerCase();
+    if (lower.includes("wan")) tags.push("family:wan");
+    if (lower.includes("qwen")) tags.push("family:qwen");
+    if (lower.includes("flux")) tags.push("family:flux");
+    if (lower.includes("sd3")) tags.push("family:sd3");
+  }
+  return [...new Set(tags)];
+}
+
+async function sendSelectedOutputsToLora() {
+  return sendSelectedOutputsToTarget({
+    target: getLoraHandoffTarget(),
+    kind: "module",
+    targetId: "chatty_lora",
+    laneId: "dataset_candidates",
+    buttonLabel: "Chatty-lora",
+    successLabel: "Chatty-lora",
+  });
+}
+
+async function sendSelectedOutputsToSandbox() {
+  return sendSelectedOutputsToTarget({
+    target: getSandboxHandoffTarget(),
+    kind: "sandbox",
+    targetId: "chattycog_sandbox",
+    laneId: "sandbox_export",
+    buttonLabel: "ChattyCog Sandbox",
+    successLabel: "ChattyCog Sandbox",
+  });
+}
+
+async function sendSelectedOutputsToTarget({ target, kind, targetId, laneId, buttonLabel, successLabel }) {
+  const selectedOutputs = getSelectedOutputs();
+  if (!target?.supported || !selectedOutputs.length) {
+    renderOutputHandoffPanel();
+    return;
+  }
+
+  if (!window.chattyCogBridge?.available || typeof window.chattyCogBridge.requestHandoff !== "function") {
+    state.handoffStatusMessage = "ChattyCog handoff bridge is unavailable right now.";
+    renderOutputHandoffPanel();
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Send ${selectedOutputs.length} selected output${selectedOutputs.length === 1 ? "" : "s"} to ${buttonLabel}? This will copy them and keep the originals in Chatty-art.`
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const payload = {
+    source_module_id: "chatty_art",
+    destination: {
+      kind,
+      target_id: targetId,
+      lane_id: laneId,
+    },
+    artifacts: selectedOutputs.map((output) => buildOutputHandoffArtifact(output)),
+    user_note: elements.outputHandoffNote.value.trim(),
+  };
+
+  state.handoffSending = true;
+  state.handoffStatusMessage = "";
+  renderOutputHandoffPanel();
+
+  try {
+    const accepted = window.chattyCogBridge.requestHandoff(payload);
+    if (!accepted) {
+      throw new Error("ChattyCog did not accept the handoff request.");
+    }
+
+    state.handoffStatusMessage = `Sent ${selectedOutputs.length} output${selectedOutputs.length === 1 ? "" : "s"} to ${successLabel}.`;
+    state.selectedOutputIds.clear();
+    elements.outputHandoffNote.value = "";
+    renderHistory();
+  } catch (error) {
+    state.handoffStatusMessage = error?.message || "ChattyCog handoff request failed.";
+    renderOutputHandoffPanel();
+  } finally {
+    state.handoffSending = false;
+    renderOutputHandoffPanel();
+  }
+}
+
+async function deleteSelectedOutputs() {
+  const selectedOutputs = getSelectedOutputs();
+  if (!selectedOutputs.length) {
+    renderOutputHandoffPanel();
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Delete ${selectedOutputs.length} selected output${selectedOutputs.length === 1 ? "" : "s"} from Chatty-art? This removes the saved files from outputs/ and also deletes any metadata sidecars tied to them.`
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  state.handoffSending = true;
+  state.handoffStatusMessage = "";
+  renderOutputHandoffPanel();
+
+  try {
+    const response = await fetch("/api/outputs/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        relative_paths: selectedOutputs.map((output) => output.relative_path),
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || `Delete failed with ${response.status}`);
+    }
+    state.selectedOutputIds.clear();
+    state.handoffStatusMessage = Array.isArray(payload.notes) ? payload.notes.join(" ") : "Selected outputs deleted.";
+    await loadOutputs();
+    await loadAssets();
+  } catch (error) {
+    state.handoffStatusMessage = error?.message || "Could not delete selected outputs yet.";
+  } finally {
+    state.handoffSending = false;
+    renderHistory();
+  }
+}
+
+function buildOutputHandoffArtifact(output) {
+  const outputRelativePath = normalizeOutputBridgePath(output?.relative_path);
+  return {
+    artifact_id: output.id || output.file_name || output.relative_path || "",
+    label: output.file_name || output.id || "Chatty-art output",
+    artifact_kind: "module_asset_file",
+    media_kind: output.kind || "",
+    source_relative_path: outputRelativePath,
+    summary: summarizeOutputForHandoff(output),
+    tags: buildOutputHandoffTags(output),
+  };
+}
+
+function normalizeOutputBridgePath(relativePath) {
+  const trimmed = String(relativePath || "").trim().replace(/\\/g, "/");
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed.startsWith("outputs/")) {
+    return trimmed;
+  }
+  return `outputs/${trimmed.replace(/^\/+/, "")}`;
+}
+
+function summarizeOutputForHandoff(output) {
+  const parts = [
+    output.prompt ? truncateBridgeText(output.prompt, 180) : "",
+    output.model ? `Model: ${output.model}` : "",
+    output.style ? `Mode: ${output.style}` : "",
+    output.resolution_label ? `Settings: ${output.resolution_label}` : "",
+  ].filter(Boolean);
+  return parts.join(" | ");
 }
 
 function renderAssignedReferences() {
@@ -2449,6 +3099,7 @@ function assignSelectedReference(slot, intent = state.referenceIntent) {
 
   clearPreparedHandoff();
   renderReferenceIntentControls();
+  renderVisionModelSelector();
   renderTrayPreview();
   syncActionState();
 }
@@ -2464,6 +3115,7 @@ function clearReferenceSlot(slot) {
 
   clearPreparedHandoff();
   renderReferenceIntentControls();
+  renderVisionModelSelector();
   renderTrayPreview();
   syncActionState();
 }
@@ -2474,6 +3126,7 @@ function clearReferenceSlots() {
   state.controlReference = null;
   clearPreparedHandoff();
   renderReferenceIntentControls();
+  renderVisionModelSelector();
   renderTrayPreview();
   syncActionState();
 }
@@ -2589,6 +3242,7 @@ function syncActionState() {
     const supported = model && model.runtime_supported && kindSupported(model, button.dataset.kind);
     button.disabled = state.generating || state.preparing || !supported || !assignedReferencesValid;
   });
+  elements.cancelGenerateButton.disabled = !state.generating || !state.currentJobId || state.canceling;
 }
 
 function buildAcceptedMessage(model, kind, batchTotal = 1) {
@@ -2644,6 +3298,9 @@ function renderPreparedHandoff() {
     elements.preparedNegativeBlock.classList.remove("hidden");
     elements.preparedNegativeInput.value = "";
     elements.preparedEstimate.innerHTML = "";
+    elements.preparedVisionBlock.classList.add("hidden");
+    elements.preparedVisionTitle.textContent = "Vision Summary";
+    elements.preparedVisionSummary.textContent = "";
     elements.preparedFocusTags.innerHTML = "";
     elements.preparedAssumptions.textContent = "";
     return;
@@ -2668,12 +3325,21 @@ function renderPreparedHandoff() {
   elements.preparedSpokenInput.value = handoff.prepared_spoken_text || "";
   elements.preparedNegativeBlock.classList.toggle("hidden", isSpeechAudio);
   elements.preparedNegativeInput.value = handoff.effective_negative_prompt || "";
+  const hasVisionDetails = Boolean(handoff.vision_summary || handoff.vision_error || handoff.vision_model);
+  elements.preparedVisionBlock.classList.toggle("hidden", !hasVisionDetails);
+  elements.preparedVisionTitle.textContent = handoff.vision_model
+    ? `Vision Summary via ${handoff.vision_model}`
+    : "Vision Summary";
+  elements.preparedVisionSummary.textContent = handoff.vision_summary
+    || handoff.vision_error
+    || "";
 
   const chips = [
     createPreparedChip(`For ${formatKind(handoff.kind)}`),
     createPreparedChip(handoff.resolution_label || "Current settings"),
     createPreparedChip(`Estimate ${formatDurationRange(handoff.estimated_time)}`),
     handoff.interpreter_model ? createPreparedChip(`Interpreter ${handoff.interpreter_model}`) : "",
+    handoff.vision_model ? createPreparedChip(`Vision Assist ${handoff.vision_model}`) : "",
     ...(Array.isArray(handoff.selected_lora_labels) && handoff.selected_lora_labels.length
       ? handoff.selected_lora_labels.map((label) => createPreparedChip(`LoRA ${label}`))
       : handoff.selected_lora_name
@@ -2723,6 +3389,17 @@ function formatDurationRange(estimate) {
   return `${formatSeconds(min)} to ${formatSeconds(Math.max(min, max))}`;
 }
 
+function formatBridgeDeliveredTime(unixMs) {
+  const value = Number(unixMs);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "";
+  }
+  return new Date(value).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
 function formatSeconds(totalSeconds) {
   const seconds = Math.max(0, Math.round(totalSeconds));
   const minutes = Math.floor(seconds / 60);
@@ -2767,6 +3444,9 @@ function buildBasePayload(kind) {
     audio_segments: audioSegments,
     manual_focus_tags: includeManualPromptControls ? parsePromptListInput(elements.manualFocusCuesInput.value) : [],
     manual_assumptions: includeManualPromptControls ? parsePromptListInput(elements.manualAssumptionsInput.value) : [],
+    manual_preserve_items: includeManualPromptControls ? parsePromptListInput(elements.manualPreserveInput.value) : [],
+    manual_change_targets: includeManualPromptControls ? parsePromptListInput(elements.manualChangeInput.value) : [],
+    manual_avoid_items: includeManualPromptControls ? parsePromptListInput(elements.manualAvoidInput.value) : [],
     prompt_assist: elements.promptAssistInput.value,
     model: model.id,
     kind,
@@ -2791,6 +3471,8 @@ function buildBasePayload(kind) {
     reference_intent: state.referenceIntent,
     end_reference_asset: state.endReference ? state.endReference.id : null,
     control_reference_asset: state.controlReference ? state.controlReference.id : null,
+    selected_prompt_model: elements.promptModelSelect.value || null,
+    selected_vision_model: elements.visionModelSelect.value || null,
     selected_lora: includeLora ? selectedLoras[0].id : null,
     selected_lora_weight: includeLora ? selectedLoras[0].weight : null,
     selected_loras: includeLora ? selectedLoras : [],
@@ -2944,6 +3626,7 @@ async function submitGeneration(kind) {
     : null;
 
   state.generating = true;
+  state.canceling = false;
   syncActionState();
   setProgress(
     0.04,
@@ -2998,13 +3681,51 @@ async function submitGeneration(kind) {
     if (accepted.used_seed !== undefined && accepted.used_seed !== null) {
       elements.seedInput.value = String(accepted.used_seed);
     }
+    syncActionState();
     setProgress(0.08, "Starting", buildAcceptedMessage(model, kind, state.currentBatchTotal));
   } catch (error) {
     state.generating = false;
+    state.canceling = false;
+    state.currentJobId = null;
     state.currentBatchTotal = 1;
     state.currentBatchCompleted = 0;
     syncActionState();
     setProgress(0, "Error", error.message || "Generation request failed.");
+  }
+}
+
+async function cancelCurrentGeneration() {
+  if (!state.currentJobId || !state.generating || state.canceling) {
+    return;
+  }
+
+  state.canceling = true;
+  syncActionState();
+  setProgress(
+    Math.max(0.05, Number(state.currentBatchCompleted || 0) / Math.max(1, Number(state.currentBatchTotal || 1))),
+    "Canceling",
+    "Cancel requested. Chatty-art is stopping the current generation and any remaining queued batch items."
+  );
+
+  try {
+    const response = await fetch("/api/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: state.currentJobId }),
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || "Cancel request failed.");
+    }
+  } catch (error) {
+    state.canceling = false;
+    syncActionState();
+    setProgress(
+      Math.max(0.05, Number(state.currentBatchCompleted || 0) / Math.max(1, Number(state.currentBatchTotal || 1))),
+      "Cancel Failed",
+      error.message || "Cancel request failed."
+    );
   }
 }
 
@@ -3038,6 +3759,7 @@ function handleServerEvent(event) {
       state.currentBatchCompleted += 1;
       if (state.currentBatchCompleted >= state.currentBatchTotal) {
         state.generating = false;
+        state.canceling = false;
         state.currentJobId = null;
         state.currentBatchTotal = 1;
         state.currentBatchCompleted = 0;
@@ -3054,8 +3776,20 @@ function handleServerEvent(event) {
     return;
   }
 
+  if (event.type === "canceled" && event.job_id === state.currentJobId) {
+    state.generating = false;
+    state.canceling = false;
+    state.currentJobId = null;
+    state.currentBatchTotal = 1;
+    state.currentBatchCompleted = 0;
+    syncActionState();
+    setProgress(0, "Canceled", event.message || "Generation canceled.");
+    return;
+  }
+
   if (event.type === "error" && event.job_id === state.currentJobId) {
     state.generating = false;
+    state.canceling = false;
     state.currentJobId = null;
     state.currentBatchTotal = 1;
     state.currentBatchCompleted = 0;
@@ -3073,12 +3807,168 @@ function upsertOutput(output) {
   }
 }
 
+function isVisionAssistOnlyModel(model) {
+  return Boolean(
+    model
+    && model.runtime_supported
+    && model.backend === "llama_cpp"
+    && model.generation_style === "expressive"
+    && String(model.family || "").toLowerCase() === "vision"
+    && model.supports_image_reference
+    && typeof model.mmproj_path === "string"
+    && model.mmproj_path.trim()
+  );
+}
+
 function getVisibleModels() {
-  return state.models.filter((model) => model.generation_style === state.generationStyle);
+  return state.models.filter((model) =>
+    model.generation_style === state.generationStyle
+    && !isVisionAssistOnlyModel(model)
+  );
 }
 
 function getSelectedModel() {
   return getVisibleModels().find((model) => model.id === elements.modelSelect.value) || null;
+}
+
+function getPromptAssistModels() {
+  return state.models.filter((model) =>
+    model.runtime_supported
+    && model.backend === "llama_cpp"
+    && model.generation_style === "expressive"
+    && !model.supports_voice_output
+    && (model.family || "").toLowerCase() !== "voice"
+  );
+}
+
+function getVisionAssistModels() {
+  return state.models.filter((model) =>
+    model.runtime_supported
+    && model.backend === "llama_cpp"
+    && model.generation_style === "expressive"
+    && model.supports_image_reference
+    && typeof model.mmproj_path === "string"
+    && model.mmproj_path.trim()
+    && !model.supports_voice_output
+    && shouldSurfaceVisionAssistModel(model)
+  );
+}
+
+function shouldSurfaceVisionAssistModel(model) {
+  const lower = (model?.name || "").toLowerCase();
+  return lower.includes("qwen2.5-vl") || lower.includes("llava");
+}
+
+function shouldShowVisionModelSelector() {
+  return elements.promptAssistInput.value !== "off"
+    && Boolean(state.primaryReference && state.primaryReference.kind === "image");
+}
+
+function shouldShowPromptModelSelector() {
+  return Boolean(getSelectedModel());
+}
+
+function renderPromptModelSelector() {
+  const shouldShow = shouldShowPromptModelSelector();
+  elements.promptModelBlock.classList.remove("hidden");
+
+  if (!shouldShow) {
+    elements.promptModelSelect.innerHTML = `<option value="">Auto (Recommended)</option>`;
+    elements.promptModelSelect.disabled = true;
+    elements.promptModelSummary.textContent = "Pick a generation model first to unlock Prompt Assist model selection. Auto keeps Prompt Assist on the safer text-only route by default, while advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.";
+    return;
+  }
+
+  const promptAssistEnabled = elements.promptAssistInput.value !== "off";
+  const selected = elements.promptModelSelect.value;
+  const promptModels = getPromptAssistModels();
+
+  if (!promptModels.length) {
+    elements.promptModelSelect.innerHTML = `<option value="">No local Prompt Assist models found</option>`;
+    elements.promptModelSelect.disabled = true;
+    elements.promptModelSummary.textContent = promptAssistEnabled
+      ? "Prompt Assist needs at least one local expressive llama.cpp model in models/. Auto prefers plain text helpers, but you can pin multimodal expressive models here when you deliberately want them doing both jobs."
+      : "Turn Prompt Assist on to use this selector. When enabled, Chatty-art prefers plain text helpers by default, but you can pin multimodal expressive models here when you deliberately want them doing both jobs.";
+    return;
+  }
+
+  elements.promptModelSelect.disabled = false;
+  elements.promptModelSelect.innerHTML = [
+    `<option value="">Auto (Recommended)</option>`,
+    ...promptModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildDropdownLabel(model))}</option>`),
+  ].join("");
+
+  if (promptModels.some((model) => model.id === selected)) {
+    elements.promptModelSelect.value = selected;
+  } else {
+    elements.promptModelSelect.value = "";
+  }
+
+  const chosen = promptModels.find((model) => model.id === elements.promptModelSelect.value) || null;
+  const multimodal = chosen && chosen.supports_image_reference && typeof chosen.mmproj_path === "string" && chosen.mmproj_path.trim();
+  if (!promptAssistEnabled) {
+    elements.promptModelSummary.textContent = chosen
+      ? `${chosen.name} is selected as the Prompt Assist interpreter, but Prompt Assist is currently off. Turn it on to use this model.`
+      : "Prompt Assist is currently off. You can still pick a model here in advance; Chatty-art will use it once Prompt Assist is turned on. Auto keeps Prompt Assist on the safer text-only route by default when enabled.";
+    return;
+  }
+
+  elements.promptModelSummary.textContent = chosen
+    ? multimodal
+      ? `${chosen.name} is pinned as the Prompt Assist interpreter. This intentionally overrides the safe text-only default and allows one multimodal expressive model to handle both prompt expansion and image analysis.`
+      : `${chosen.name} is pinned as the Prompt Assist interpreter. Leave this on Auto if you want Chatty-art to stay on the safer text-only route.`
+    : "Auto keeps Prompt Assist on the safer text-only route by default. Advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.";
+}
+
+function renderVisionModelSelector() {
+  const shouldShow = shouldShowVisionModelSelector();
+  elements.visionModelBlock.classList.toggle("hidden", !shouldShow);
+
+  if (!shouldShow) {
+    elements.visionModelSelect.innerHTML = `<option value="">Auto (Recommended)</option>`;
+    elements.visionModelSelect.disabled = true;
+    elements.visionModelSummary.textContent = "Auto picks a local multimodal helper when Prompt Assist is working from an image reference. Right now it prefers Qwen2.5-VL-7B first and falls back to LLaVA.";
+    return;
+  }
+
+  const selected = elements.visionModelSelect.value;
+  const visionModels = getVisionAssistModels();
+
+  if (!visionModels.length) {
+    elements.visionModelSelect.innerHTML = `<option value="">No local vision models found</option>`;
+    elements.visionModelSelect.disabled = true;
+    elements.visionModelSummary.textContent = "Prompt Assist can still run, but Vision Assist has no surfaced local helper right now. Recommended pair: Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf plus mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf. Fallback pair: llava-v1.5-7b-Q4_K_M.gguf plus llava-v1.5-7b-mmproj-model-f16.gguf.";
+    return;
+  }
+
+  elements.visionModelSelect.disabled = false;
+  elements.visionModelSelect.innerHTML = [
+    `<option value="">Auto (Recommended)</option>`,
+    ...visionModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(visionAssistLabel(model))}</option>`),
+  ].join("");
+
+  if (visionModels.some((model) => model.id === selected)) {
+    elements.visionModelSelect.value = selected;
+  } else {
+    elements.visionModelSelect.value = "";
+  }
+
+  const chosen = visionModels.find((model) => model.id === elements.visionModelSelect.value) || null;
+  elements.visionModelSummary.textContent = chosen
+    ? `${visionAssistLabel(chosen)} is pinned as the image-analysis helper for Prompt Assist. Leave this on Auto if you want Chatty-art to choose for you.`
+    : "Auto lets Chatty-art choose a local multimodal helper for image analysis before Prompt Assist expands the handoff. Right now Auto prefers Qwen2.5-VL-7B first and falls back to LLaVA.";
+}
+
+function visionAssistLabel(model) {
+  const name = model?.name || "";
+  const lower = name.toLowerCase();
+  if (lower.includes("qwen2.5-vl")) {
+    return `${name} (Preferred)`;
+  }
+  if (lower.includes("llava")) {
+    return `${name} (Fallback)`;
+  }
+  return name;
 }
 
 function buildDropdownLabel(model) {
@@ -3154,7 +4044,7 @@ function createModelBadge(label, tone) {
 
 function renderModelNotice(message, hiddenModeCount = 0) {
   const hiddenNote = hiddenModeCount > 0
-    ? `<div class="model-summary-foot">${escapeHtml(`${hiddenModeCount} file(s) belong to the other mode and are hidden right now.`)}</div>`
+    ? `<div class="model-summary-foot">${escapeHtml(`${hiddenModeCount} file(s) are hidden from this generator picker right now.`)}</div>`
     : "";
   elements.modelSummary.innerHTML = `
     <div class="model-summary-card">
@@ -3265,6 +4155,7 @@ function setProgress(percent, phase, message) {
   elements.progressFill.style.width = `${Math.max(0, Math.min(1, percent)) * 100}%`;
   elements.progressPhase.textContent = phase;
   elements.progressMessage.textContent = message;
+  syncChattyCogBridgeStatus();
 }
 
 function bindSettingDisplay(input, label, formatter) {
@@ -3384,4 +4275,136 @@ function escapeHtml(value) {
 
 function escapeAttribute(value) {
   return escapeHtml(value);
+}
+
+function syncChattyCogBridgeStatus() {
+  if (!window.chattyCogBridge?.available || typeof window.chattyCogBridge.updateStatus !== "function") {
+    return;
+  }
+
+  const payload = buildChattyCogBridgeStatus();
+  const fingerprint = JSON.stringify(payload);
+  if (!fingerprint || fingerprint === lastBridgeStatusFingerprint) {
+    return;
+  }
+
+  lastBridgeStatusFingerprint = fingerprint;
+  window.chattyCogBridge.updateStatus(payload);
+}
+
+function buildChattyCogBridgeStatus() {
+  const selectedModel = getSelectedModel();
+  const currentOutput = state.currentPreview;
+  const prompt = elements.promptInput.value.trim();
+  const audioPrompt = elements.audioLiteralPromptInput.value.trim();
+  const activePrompt = prompt || audioPrompt;
+  const outputCount = state.outputs.length;
+  const assignedReferences = [
+    state.primaryReference ? `${state.primaryReference.name} (${referenceIntentLabel(state.referenceIntent)})` : null,
+    state.endReference ? `${state.endReference.name} (end frame)` : null,
+    state.controlReference ? `${state.controlReference.name} (control)` : null,
+  ].filter(Boolean);
+  const preparedKind = state.preparedHandoff?.kind ? formatKind(state.preparedHandoff.kind) : null;
+  const latestOutputLabel = currentOutput
+    ? `${formatKind(currentOutput.kind)} - ${currentOutput.file_name || currentOutput.name || "saved output"}`
+    : null;
+
+  let statusLine = "Chatty-art is idle.";
+  if (state.generating && state.currentJobId) {
+    statusLine = `Chatty-art is generating media in ${state.generationStyle} mode.`;
+  } else if (state.preparing) {
+    statusLine = "Chatty-art is preparing a generation handoff preview.";
+  } else if (preparedKind) {
+    statusLine = `Chatty-art has a prepared ${preparedKind.toLowerCase()} handoff ready to review.`;
+  } else if (latestOutputLabel) {
+    statusLine = `Chatty-art is idle after saving ${latestOutputLabel}.`;
+  }
+
+  const summaryParts = [
+    statusLine,
+    selectedModel ? `Model: ${selectedModel.name}.` : "Model not selected yet.",
+    activePrompt ? `Prompt focus: ${truncateBridgeText(activePrompt, 140)}.` : "Prompt is still empty.",
+    assignedReferences.length ? `References: ${assignedReferences.join("; ")}.` : "No references assigned.",
+    latestOutputLabel ? `Latest output: ${latestOutputLabel}.` : outputCount ? `Saved outputs available: ${outputCount}.` : "No saved outputs yet.",
+  ];
+
+  const snapshotLines = [
+    "# Chatty-art Snapshot",
+    "",
+    `- Generation style: ${state.generationStyle}`,
+    `- Workflow mode: ${state.workflowMode}`,
+    `- Current phase: ${elements.progressPhase.textContent.trim() || "(unset)"}`,
+    `- Current status: ${elements.progressMessage.textContent.trim() || "(unset)"}`,
+    `- Selected model: ${selectedModel?.name || "(none)"}`,
+    `- Prompt assist: ${elements.promptAssistInput.value || "(unset)"}`,
+    `- Seed: ${elements.seedInput.value.trim() || "(random)"}`,
+    `- Prepared handoff: ${preparedKind || "none"}`,
+    `- Prompt: ${prompt || "(empty)"}`,
+    `- Audio words/sounds: ${audioPrompt || "(empty)"}`,
+    `- Negative prompt: ${elements.negativePromptInput.value.trim() || "(empty)"}`,
+    `- Manual focus cues: ${elements.manualFocusCuesInput.value.trim() || "(empty)"}`,
+    `- Selected references: ${assignedReferences.length ? assignedReferences.join(" | ") : "none"}`,
+    `- Current output count: ${outputCount}`,
+    `- Latest output: ${latestOutputLabel || "none"}`,
+  ];
+
+  return {
+    module_id: "chatty_art",
+    event_type: "suspend_rundown",
+    summary: summaryParts.join(" "),
+    snapshot: snapshotLines.join("\n"),
+    tags: ["generation", "media", "prompt", "reference", "output", "webview"],
+    payload: {
+      activity_hint: state.generating
+        ? "Host is generating media"
+        : state.preparing
+          ? "Host is preparing a handoff preview"
+          : preparedKind
+            ? "Host is reviewing a prepared handoff"
+            : "Host is adjusting media settings",
+      generation_style: state.generationStyle,
+      workflow_mode: state.workflowMode,
+      generating: state.generating,
+      preparing: state.preparing,
+      canceling: state.canceling,
+      current_job_id: state.currentJobId,
+      current_batch_total: state.currentBatchTotal,
+      current_batch_completed: state.currentBatchCompleted,
+      selected_model_id: selectedModel?.id || null,
+      selected_model_name: selectedModel?.name || null,
+      selected_model_backend: selectedModel?.backend || null,
+      prepared_handoff_kind: state.preparedHandoff?.kind || null,
+      prompt: prompt || null,
+      audio_prompt: audioPrompt || null,
+      negative_prompt: elements.negativePromptInput.value.trim() || null,
+      output_count: outputCount,
+      latest_output: currentOutput
+        ? {
+            id: currentOutput.id || null,
+            kind: currentOutput.kind || null,
+            file_name: currentOutput.file_name || currentOutput.name || null,
+            model: currentOutput.model || null,
+            url: currentOutput.url || null,
+          }
+        : null,
+      references: {
+        primary: state.primaryReference?.name || null,
+        primary_intent: state.primaryReference ? state.referenceIntent : null,
+        end: state.endReference?.name || null,
+        control: state.controlReference?.name || null,
+      },
+    },
+    updated_at_unix_ms: Date.now(),
+  };
+}
+
+function truncateBridgeText(value, limit) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "";
+  }
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, limit - 3)).trim()}...`;
 }

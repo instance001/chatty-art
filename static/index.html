@@ -68,6 +68,25 @@
             <span class="setting-copy">Optional assumptions to carry into the handoff review. These are helpful when you want more control than the automatic expansion is giving you.</span>
           </label>
 
+          <label class="field-block hidden" id="manualPreserveBlock">
+            <span class="field-title">Manual Keep / Preserve</span>
+            <textarea id="manualPreserveInput" rows="3" placeholder="Optional advanced override for guide/edit image workflows, like: kookaburra, branch, side profile, leafy background."></textarea>
+            <span class="setting-copy">Optional exact things that should stay. These override weak vision guesses when you want to preserve the main subject, pose, framing, or important objects.</span>
+          </label>
+
+          <label class="field-block hidden" id="manualChangeBlock">
+            <span class="field-title">Manual Change Targets</span>
+            <textarea id="manualChangeInput" rows="3" placeholder="Optional advanced override for guide/edit image workflows, like: add frog rider, replace background, change perch angle."></textarea>
+            <span class="setting-copy">Optional exact things you want changed or added. Use this when the main prompt alone is too vague for the handoff.</span>
+          </label>
+
+          <label class="field-block hidden" id="manualAvoidBlock">
+            <span class="field-title">Manual Avoid</span>
+            <textarea id="manualAvoidInput" rows="3" placeholder="Optional advanced override for guide/edit image workflows, like: remove extra animals, avoid bird duplication, avoid copied background."></textarea>
+            <span class="setting-copy">Optional exact things the handoff should avoid. This is useful when the model keeps copying or inventing elements you do not want.</span>
+            <span class="setting-copy">Reliable edit recipe: keep what must stay, name one exact change, then list the failure mode to avoid. Example: preserve `kookaburra, branch, background`; change `add small green frog rider`; avoid `merged bodies, hybrid animal`.</span>
+          </label>
+
           <div class="field-block hidden" id="audioSegmentsBlock">
             <div class="field-title-row">
               <span class="field-title" id="audioSegmentsTitle">Words / Sound Sequence</span>
@@ -84,6 +103,18 @@
             </label>
             <div class="selection-summary" id="modelSummary">No models detected yet.</div>
           </div>
+
+          <label class="field-block" id="promptModelBlock">
+            <span class="field-title">Prompt Assist Model</span>
+            <select id="promptModelSelect"></select>
+            <span class="setting-copy" id="promptModelSummary">Auto keeps Prompt Assist on the safer text-only route by default. Advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.</span>
+          </label>
+
+          <label class="field-block hidden" id="visionModelBlock">
+            <span class="field-title">Vision Assist Model</span>
+            <select id="visionModelSelect"></select>
+            <span class="setting-copy" id="visionModelSummary">Auto picks a local multimodal helper when Prompt Assist is working from an image reference. Right now it prefers Qwen2.5-VL-7B first and falls back to LLaVA.</span>
+          </label>
         </article>
 
         <article class="panel">
@@ -241,6 +272,27 @@
               <div id="loraList" class="lora-stack-list"></div>
               <span class="setting-copy" id="loraCopy">Choose compatible LoRAs for the selected realism model. Chatty-art filters the list by family.</span>
               <span class="setting-copy" id="loraWeightCopy">Each LoRA row has its own strength slider. Start with one adapter around 0.60 to 1.00, then layer carefully if you need a stronger combined effect.</span>
+              <div id="loraInboxPanel" class="lora-inbox-panel hidden">
+                <div class="output-handoff-copy">
+                  <strong>LoRA inbox from ChattyCog</strong>
+                  <span id="loraInboxSummary">Reviewed LoRA handoffs from sibling modules can land here for explicit import into Chatty-art.</span>
+                </div>
+                <label class="field-block compact-field">
+                  <span class="field-title">Import into family folder</span>
+                  <select id="loraInboxFamilySelect">
+                    <option value="flux">Flux</option>
+                    <option value="sd">Stable Diffusion</option>
+                    <option value="sd3">Stable Diffusion 3</option>
+                    <option value="wan">Wan</option>
+                    <option value="qwen">Qwen</option>
+                  </select>
+                </label>
+                <div id="loraInboxList" class="lora-inbox-list"></div>
+                <div class="output-handoff-actions">
+                  <button id="importLoraInboxButton" class="ghost-button" type="button">Import selected LoRAs</button>
+                  <button id="clearLoraInboxSelectionButton" class="ghost-button" type="button">Clear selection</button>
+                </div>
+              </div>
             </label>
 
             <label class="setting-card">
@@ -311,6 +363,12 @@
 
             <div class="prepared-estimate" id="preparedEstimate"></div>
             <div class="prepared-lists">
+              <div class="prepared-list hidden" id="preparedVisionBlock">
+                <strong id="preparedVisionTitle">Vision Summary</strong>
+                <div id="preparedVisionSummary" class="prepared-copy"></div>
+                <span class="setting-copy">Best results usually come from one clear subject, readable lighting, and one obvious focal point instead of a very busy collage.</span>
+                <span class="setting-copy">For edit jobs, the most reliable pattern is: say what must stay, then say the one exact thing to add or change, then say what should be avoided. Example: keep the kookaburra, branch, and background; add a small separate frog rider on the bird's back; avoid merged bodies or one hybrid animal.</span>
+              </div>
               <div class="prepared-list">
                 <strong>Focus Cues</strong>
                 <div id="preparedFocusTags" class="prepared-chip-group"></div>
@@ -342,6 +400,7 @@
             <button class="action-button gif-action" data-kind="gif" type="button">Generate GIF</button>
             <button class="action-button video-action" data-kind="video" type="button">Generate Video</button>
             <button class="action-button audio-action" data-kind="audio" type="button">Generate Audio</button>
+            <button id="cancelGenerateButton" class="action-button cancel-action" type="button">Cancel Run</button>
           </div>
 
           <div class="progress-panel">
@@ -393,6 +452,24 @@
           <div class="panel-header">
             <h2>Recent Outputs</h2>
             <span class="panel-note">Saved files from <code>outputs/</code></span>
+          </div>
+          <div id="outputHandoffPanel" class="output-handoff-panel hidden">
+            <div class="output-handoff-copy">
+              <strong>Share selected outputs</strong>
+              <span id="outputHandoffSummary">Select one or more saved outputs to share a copy through ChattyCog.</span>
+            </div>
+            <label class="field-block compact-field">
+              <span class="field-title">Handoff note</span>
+              <textarea id="outputHandoffNote" rows="2" placeholder="Optional note for ChattyCog, like: candidate banner drafts for website header review."></textarea>
+            </label>
+            <div id="outputHandoffPreview" class="output-handoff-preview">
+              <div class="empty-state compact">Select one or more outputs to preview the mediated handoff details.</div>
+            </div>
+            <div class="output-handoff-actions">
+              <button id="sendOutputsToLoraButton" class="ghost-button" type="button">Send Selected to Chatty-lora</button>
+              <button id="sendOutputsToSandboxButton" class="ghost-button" type="button">Send Selected to ChattyCog Sandbox</button>
+              <button id="deleteSelectedOutputsButton" class="ghost-button danger-button" type="button">Delete Selected</button>
+            </div>
           </div>
           <div id="historyGrid" class="history-grid"></div>
         </article>

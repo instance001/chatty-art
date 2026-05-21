@@ -20,8 +20,8 @@ use crate::{
         VideoPlan, Waveform,
     },
     types::{
-        GenerationSettings, GenerationStyle, InputAsset, MediaKind, ModelInfo, PromptAssistMode,
-        ReferenceIntent, ReferenceSummary, VideoResolutionPreset,
+        AssetSource, GenerationSettings, GenerationStyle, InputAsset, MediaKind, ModelInfo,
+        PromptAssistMode, ReferenceIntent, ReferenceSummary, VideoResolutionPreset,
     },
 };
 
@@ -63,9 +63,39 @@ pub struct CompiledPrompt {
     pub negative_prompt: Option<String>,
     pub spoken_text: Option<String>,
     pub note: String,
+    pub vision_model_name: Option<String>,
+    pub vision_summary: Option<String>,
+    pub vision_error: Option<String>,
     pub brief: PromptAssistBrief,
     pub trace: PlannerTrace,
     pub used_original_prompt: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisionAssistBrief {
+    pub primary_subject: String,
+    pub setting: String,
+    pub composition: String,
+    pub camera_framing: String,
+    pub lighting: String,
+    pub style_keywords: Vec<String>,
+    pub palette: Vec<String>,
+    pub important_objects: Vec<String>,
+    pub preserve: Vec<String>,
+    pub change_targets: Vec<String>,
+    pub avoid: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompactVisionAssistBrief {
+    pub primary_subject: String,
+    pub setting: String,
+    pub camera_framing: String,
+    pub lighting: String,
+    pub palette: Vec<String>,
+    pub important_objects: Vec<String>,
+    pub preserve: Vec<String>,
+    pub avoid: Vec<String>,
 }
 
 struct InvokedPlan<T> {
@@ -73,6 +103,12 @@ struct InvokedPlan<T> {
     pub raw_output: String,
     pub stderr: String,
     pub extracted_json: Option<String>,
+}
+
+struct VisionAssistState {
+    model_name: String,
+    brief: Option<VisionAssistBrief>,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,8 +221,13 @@ pub async fn compile_prompt(
     runtime_dir: &Path,
     model_dir: &Path,
     model: &ModelInfo,
+    vision_model: Option<&ModelInfo>,
+    vision_model_was_auto_selected: bool,
     user_prompt: &str,
     user_negative_prompt: Option<&str>,
+    manual_preserve_items: &[String],
+    manual_change_targets: &[String],
+    manual_avoid_items: &[String],
     style: GenerationStyle,
     kind: MediaKind,
     mode: PromptAssistMode,
@@ -194,6 +235,47 @@ pub async fn compile_prompt(
     supports_voice_output: bool,
     seed: u32,
 ) -> Result<CompiledPrompt> {
+    let vision_state = if reference.is_some_and(|summary| summary.kind == MediaKind::Image) {
+        match vision_model {
+            Some(vision_model) => {
+                match analyze_reference_image(
+                    runtime_dir,
+                    model_dir,
+                    vision_model,
+                    user_prompt,
+                    user_negative_prompt,
+                    reference,
+                    seed,
+                )
+                .await
+                {
+                    Ok(brief) => Some(VisionAssistState {
+                        model_name: vision_model.name.clone(),
+                        brief: Some(brief),
+                        error: None,
+                    }),
+                    Err(error) => Some(VisionAssistState {
+                        model_name: vision_model.name.clone(),
+                        brief: None,
+                        error: Some(error.to_string()),
+                    }),
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let mut effective_vision_brief = vision_state
+        .as_ref()
+        .and_then(|state| state.brief.clone());
+    apply_manual_vision_overrides(
+        &mut effective_vision_brief,
+        manual_preserve_items,
+        manual_change_targets,
+        manual_avoid_items,
+    );
+    let vision_brief = effective_vision_brief.as_ref();
     let schema = prompt_assist_schema(kind, supports_voice_output);
     let prompt = prompt_assist_prompt(
         user_prompt,
@@ -202,6 +284,7 @@ pub async fn compile_prompt(
         kind,
         mode,
         reference,
+        vision_brief,
         supports_voice_output,
     );
     let max_tokens = match mode {
@@ -254,7 +337,18 @@ pub async fn compile_prompt(
                 prompt: compiled_prompt,
                 negative_prompt,
                 spoken_text,
-                note: prompt_assist_note(mode, &brief, kind, supports_voice_output),
+                note: prompt_assist_note(
+                    mode,
+                    &brief,
+                    kind,
+                    supports_voice_output,
+                    vision_model,
+                    vision_model_was_auto_selected,
+                    vision_brief,
+                ),
+                vision_model_name: vision_state.as_ref().map(|state| state.model_name.clone()),
+                vision_summary: vision_brief.map(|brief| vision_summary(Some(brief))),
+                vision_error: vision_state.as_ref().and_then(|state| state.error.clone()),
                 brief,
                 trace: PlannerTrace {
                     used_fallback: false,
@@ -288,8 +382,14 @@ pub async fn compile_prompt(
                     .filter(|value| !value.is_empty())
                     .map(str::to_string),
                 spoken_text: spoken_text.clone(),
-                note: "Prompt Assist could not extract a clean brief, so Chatty-art fell back to a simpler local handoff."
-                    .to_string(),
+                note: fallback_prompt_assist_note(
+                    vision_model,
+                    vision_model_was_auto_selected,
+                    vision_brief,
+                ),
+                vision_model_name: vision_state.as_ref().map(|state| state.model_name.clone()),
+                vision_summary: vision_brief.map(|brief| vision_summary(Some(brief))),
+                vision_error: vision_state.as_ref().and_then(|state| state.error.clone()),
                 brief: PromptAssistBrief {
                     expanded_prompt: fallback_prompt,
                     negative_prompt: user_negative_prompt.unwrap_or_default().trim().to_string(),
@@ -307,6 +407,109 @@ pub async fn compile_prompt(
             })
         }
         Err(InvokeError::Runtime(error)) => Err(error),
+    }
+}
+
+fn apply_manual_vision_overrides(
+    vision_brief: &mut Option<VisionAssistBrief>,
+    manual_preserve_items: &[String],
+    manual_change_targets: &[String],
+    manual_avoid_items: &[String],
+) {
+    let preserve = normalize_vision_items(manual_preserve_items, 8, &HashSet::new());
+    let change = normalize_vision_items(manual_change_targets, 8, &HashSet::new());
+    let avoid = normalize_vision_items(manual_avoid_items, 8, &HashSet::new());
+
+    if preserve.is_empty() && change.is_empty() && avoid.is_empty() {
+        return;
+    }
+
+    if vision_brief.is_none() {
+        *vision_brief = Some(VisionAssistBrief {
+            primary_subject: String::new(),
+            setting: String::new(),
+            composition: String::new(),
+            camera_framing: String::new(),
+            lighting: String::new(),
+            style_keywords: Vec::new(),
+            palette: Vec::new(),
+            important_objects: Vec::new(),
+            preserve: Vec::new(),
+            change_targets: Vec::new(),
+            avoid: Vec::new(),
+        });
+    }
+
+    if let Some(brief) = vision_brief.as_mut() {
+        if !preserve.is_empty() {
+            brief.preserve = preserve;
+        }
+        if !change.is_empty() {
+            brief.change_targets = change;
+        }
+        if !avoid.is_empty() {
+            brief.avoid = avoid;
+        }
+        *brief = normalize_vision_assist_brief(brief.clone());
+    }
+}
+
+async fn analyze_reference_image(
+    runtime_dir: &Path,
+    model_dir: &Path,
+    model: &ModelInfo,
+    user_prompt: &str,
+    user_negative_prompt: Option<&str>,
+    reference: Option<&ReferenceSummary>,
+    seed: u32,
+) -> Result<VisionAssistBrief> {
+    let reference = reference.ok_or_else(|| anyhow!("missing image reference for vision assist"))?;
+    let schema = vision_assist_schema();
+    let prompt = vision_assist_prompt(user_prompt, user_negative_prompt, reference);
+    let primary_attempt = invoke_llama_json::<VisionAssistBrief>(
+        runtime_dir,
+        model_dir.join(relative_to_native_path(&model.relative_path)),
+        model,
+        &compiler_settings(),
+        seed,
+        280,
+        prompt,
+        schema,
+        Some(reference),
+        "vision-assist",
+    )
+    .await;
+
+    match primary_attempt {
+        Ok(invoked) => Ok(normalize_vision_assist_brief(invoked.value)),
+        Err(primary_error) if prefers_compact_vision_retry(model) => {
+            let compact_attempt = invoke_llama_json::<CompactVisionAssistBrief>(
+                runtime_dir,
+                model_dir.join(relative_to_native_path(&model.relative_path)),
+                model,
+                &compiler_settings(),
+                seed,
+                180,
+                compact_vision_assist_prompt(user_prompt, user_negative_prompt, reference),
+                compact_vision_assist_schema(),
+                Some(reference),
+                "vision-assist-compact",
+            )
+            .await;
+
+            match compact_attempt {
+                Ok(invoked) => Ok(normalize_vision_assist_brief(
+                    expand_compact_vision_assist_brief(invoked.value),
+                )),
+                Err(compact_error) => Err(format_vision_assist_error(primary_error)
+                    .context(format!(
+                        "A smaller compatibility retry also failed for '{}': {}",
+                        model.name,
+                        format_vision_assist_error(compact_error)
+                    ))),
+            }
+        }
+        Err(primary_error) => Err(format_vision_assist_error(primary_error)),
     }
 }
 
@@ -350,6 +553,7 @@ pub async fn build_reference_summary(
     Ok(ReferenceSummary {
         name: asset.name.clone(),
         relative_path: asset.relative_path.clone(),
+        source: asset.source,
         kind: asset.kind,
         palette,
         intent,
@@ -572,7 +776,29 @@ async fn invoke_llama_json<T: DeserializeOwned>(
         .await
         .map_err(|error| InvokeError::Runtime(error.into()))?;
 
-    let executable = runtime_dir.join("llama-cli.exe");
+    let uses_multimodal_cli = matches!(
+        reference,
+        Some(reference)
+            if (reference.kind == MediaKind::Image && model.supports_image_reference)
+                || (reference.kind == MediaKind::Audio && model.supports_audio_reference)
+    );
+    let executable = if uses_multimodal_cli {
+        runtime_dir.join("llama-mtmd-cli.exe")
+    } else {
+        let completion = runtime_dir.join("llama-completion.exe");
+        if completion.exists() {
+            completion
+        } else {
+            runtime_dir.join("llama-cli.exe")
+        }
+    };
+    if !executable.exists() {
+        let _ = fs::remove_file(&prompt_file).await;
+        let _ = fs::remove_file(&schema_file).await;
+        return Err(InvokeError::Runtime(anyhow!(
+            "Prompt Assist could not start because the bundled llama.cpp runtime executables are missing. Restore the bundled llama.cpp runtime files into runtime/."
+        )));
+    }
     let mut command = Command::new(&executable);
     command
         .current_dir(runtime_dir)
@@ -595,18 +821,34 @@ async fn invoke_llama_json<T: DeserializeOwned>(
         .arg("--device")
         .arg("Vulkan0")
         .arg("--fit")
-        .arg("on")
-        .arg("--single-turn")
-        .arg("--no-display-prompt")
-        .arg("--no-jinja")
-        .arg("--log-disable");
+        .arg("on");
+
+    if uses_multimodal_cli {
+        command
+            .arg("--chat-template")
+            .arg("vicuna");
+    } else {
+        command
+            .arg("--single-turn")
+            .arg("--no-conversation")
+            .arg("--no-display-prompt")
+            .arg("--no-jinja")
+            .arg("--skip-chat-parsing")
+            .arg("--log-disable");
+    }
 
     if let Some(reference) = reference {
         let relative = relative_to_native_path(&reference.relative_path);
         let input_path = runtime_dir
             .parent()
-            .map(|root| root.join("input").join(relative))
-            .ok_or_else(|| InvokeError::Runtime(anyhow!("could not resolve input path")))?;
+            .map(|root| {
+                let reference_root = match reference.source {
+                    AssetSource::Input => "input",
+                    AssetSource::Output => "outputs",
+                };
+                root.join(reference_root).join(relative)
+            })
+            .ok_or_else(|| InvokeError::Runtime(anyhow!("could not resolve reference path")))?;
 
         if reference.kind == MediaKind::Image && model.supports_image_reference {
             if let Some(mmproj) = &model.mmproj_path {
@@ -633,17 +875,23 @@ async fn invoke_llama_json<T: DeserializeOwned>(
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let extracted = extract_json_object(&stdout);
+    let extracted_candidates = extract_json_objects(&stdout);
+    let parsed = extracted_candidates.iter().rev().find_map(|json| {
+        serde_json::from_str::<T>(json)
+            .ok()
+            .map(|value| (value, json.clone()))
+    });
+    let extracted = parsed
+        .as_ref()
+        .map(|(_, json)| json.clone())
+        .or_else(|| extracted_candidates.last().cloned());
 
-    match extracted
-        .as_deref()
-        .and_then(|json| serde_json::from_str::<T>(json).ok())
-    {
-        Some(value) => Ok(InvokedPlan {
+    match parsed {
+        Some((value, extracted_json)) => Ok(InvokedPlan {
             value,
             raw_output: stdout,
             stderr,
-            extracted_json: extracted,
+            extracted_json: Some(extracted_json),
         }),
         None if output.status.success() => Err(InvokeError::Parse {
             raw_output: stdout,
@@ -662,11 +910,12 @@ async fn invoke_llama_json<T: DeserializeOwned>(
     }
 }
 
-fn extract_json_object(output: &str) -> Option<String> {
+fn extract_json_objects(output: &str) -> Vec<String> {
     let mut start = None;
     let mut depth = 0usize;
     let mut in_string = false;
     let mut escaped = false;
+    let mut objects = Vec::new();
 
     for (index, character) in output.char_indices() {
         if in_string {
@@ -697,7 +946,8 @@ fn extract_json_object(output: &str) -> Option<String> {
                 depth -= 1;
                 if depth == 0 {
                     if let Some(start_index) = start {
-                        return Some(output[start_index..=index].to_string());
+                        objects.push(output[start_index..=index].to_string());
+                        start = None;
                     }
                 }
             }
@@ -705,7 +955,7 @@ fn extract_json_object(output: &str) -> Option<String> {
         }
     }
 
-    None
+    objects
 }
 
 fn prompt_assist_schema(kind: MediaKind, supports_voice_output: bool) -> Value {
@@ -749,6 +999,133 @@ fn prompt_assist_schema(kind: MediaKind, supports_voice_output: bool) -> Value {
             }
         },
         "required": ["expanded_prompt", "negative_prompt", "assumptions", "focus_tags"],
+        "additionalProperties": false
+    })
+}
+
+fn vision_assist_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "primary_subject": {
+                "type": "string",
+                "description": "Specific main subject in 2-8 words, such as 'kookaburra on branch' or 'yellow songbird perched on twig'. Avoid generic single words like 'bird' unless nothing more specific is visible."
+            },
+            "setting": {
+                "type": "string",
+                "description": "Short environment phrase such as 'leafy outdoor habitat' or 'tree branch against soft sky'. Avoid repeating the subject name."
+            },
+            "composition": {
+                "type": "string",
+                "description": "Short layout note such as 'single subject centered on branch' or 'bird offset left with blurred background'."
+            },
+            "camera_framing": {
+                "type": "string",
+                "description": "Short framing note such as 'medium close-up', 'side profile', or 'eye-level wildlife shot'."
+            },
+            "lighting": {
+                "type": "string",
+                "description": "Short lighting note such as 'soft daylight', 'bright natural light', or 'overcast outdoor light'."
+            },
+            "style_keywords": {
+                "type": "array",
+                "maxItems": 6,
+                "items": { "type": "string" }
+            },
+            "palette": {
+                "type": "array",
+                "maxItems": 6,
+                "items": { "type": "string" }
+            },
+            "important_objects": {
+                "type": "array",
+                "maxItems": 8,
+                "items": { "type": "string" }
+            },
+            "preserve": {
+                "type": "array",
+                "maxItems": 8,
+                "items": { "type": "string" }
+            },
+            "change_targets": {
+                "type": "array",
+                "maxItems": 8,
+                "items": { "type": "string" }
+            },
+            "avoid": {
+                "type": "array",
+                "maxItems": 8,
+                "items": { "type": "string" }
+            }
+        },
+        "required": [
+            "primary_subject",
+            "setting",
+            "composition",
+            "camera_framing",
+            "lighting",
+            "style_keywords",
+            "palette",
+            "important_objects",
+            "preserve",
+            "change_targets",
+            "avoid"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn compact_vision_assist_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "primary_subject": {
+                "type": "string",
+                "description": "Specific main subject in 2-8 words."
+            },
+            "setting": {
+                "type": "string",
+                "description": "Short environment phrase."
+            },
+            "camera_framing": {
+                "type": "string",
+                "description": "Short framing phrase such as side profile or medium close-up."
+            },
+            "lighting": {
+                "type": "string",
+                "description": "Short lighting phrase such as soft daylight."
+            },
+            "palette": {
+                "type": "array",
+                "maxItems": 4,
+                "items": { "type": "string" }
+            },
+            "important_objects": {
+                "type": "array",
+                "maxItems": 6,
+                "items": { "type": "string" }
+            },
+            "preserve": {
+                "type": "array",
+                "maxItems": 6,
+                "items": { "type": "string" }
+            },
+            "avoid": {
+                "type": "array",
+                "maxItems": 6,
+                "items": { "type": "string" }
+            }
+        },
+        "required": [
+            "primary_subject",
+            "setting",
+            "camera_framing",
+            "lighting",
+            "palette",
+            "important_objects",
+            "preserve",
+            "avoid"
+        ],
         "additionalProperties": false
     })
 }
@@ -996,6 +1373,7 @@ fn prompt_assist_prompt(
     kind: MediaKind,
     mode: PromptAssistMode,
     reference: Option<&ReferenceSummary>,
+    vision: Option<&VisionAssistBrief>,
     supports_voice_output: bool,
 ) -> String {
     if kind == MediaKind::Audio && supports_voice_output {
@@ -1009,12 +1387,49 @@ fn prompt_assist_prompt(
     }
 
     format!(
-        "You are Prompt Assist for a local creative generation tool.\nReturn only JSON matching the schema.\nExpand short human prompts into a compact generator-ready brief.\nWrite the expanded_prompt as direct descriptive cue phrases, not as a conversation, analysis, explanation, or story.\nUse concrete subject, setting, composition, camera/framing, lighting, texture, color, atmosphere, motion, and quality cues when relevant.\nPrefer dense comma-separated or clause-separated descriptors over chatty sentences.\nDo not mention the user, what they did or did not specify, or your own reasoning.\nDo not contradict explicit user details.\nOnly fill in omitted details with reasonable defaults.\nIf the user leaves something open, choose common, low-risk defaults instead of something bizarre.\nDo not invent unusual anatomy, anthropomorphic behavior, extra limbs, impossible poses, or extra subjects unless the user clearly asked for them.\nIf the subject is an animal, keep it in a normal natural pose unless told otherwise.\nThe negative_prompt should be a concise comma-separated artifact-avoidance list, not a sentence.\nfocus_tags should be short generator-friendly cue tags.\nAssist strength: {}.\nTarget mode: {}.\nTarget media: {}.\nMedia guidance: {}.\nReference: {}.\nOriginal negative prompt: {}.\nOriginal user prompt: {}",
+        "You are Prompt Assist for a local creative generation tool.\nReturn only JSON matching the schema.\nExpand short human prompts into a compact generator-ready brief.\nWrite the expanded_prompt as direct descriptive cue phrases, not as a conversation, analysis, explanation, or story.\nUse concrete subject, setting, composition, camera/framing, lighting, texture, color, atmosphere, motion, and quality cues when relevant.\nPrefer dense comma-separated or clause-separated descriptors over chatty sentences.\nDo not mention the user, what they did or did not specify, or your own reasoning.\nDo not contradict explicit user details.\nOnly fill in omitted details with reasonable defaults.\nIf the user leaves something open, choose common, low-risk defaults instead of something bizarre.\nDo not invent unusual anatomy, anthropomorphic behavior, extra limbs, impossible poses, or extra subjects unless the user clearly asked for them.\nIf the subject is an animal, keep it in a normal natural pose unless told otherwise.\nThe negative_prompt should be a concise comma-separated artifact-avoidance list, not a sentence.\nfocus_tags should be short generator-friendly cue tags.\nAssist strength: {}.\nTarget mode: {}.\nTarget media: {}.\nMedia guidance: {}.\nReference: {}.\nVision analysis: {}.\nOriginal negative prompt: {}.\nOriginal user prompt: {}",
         prompt_assist_strength(mode),
         generation_style_label(style),
         kind.as_str(),
         prompt_assist_media_guidance(kind, style, supports_voice_output),
         reference_summary(reference),
+        vision_summary(vision),
+        user_negative_prompt.unwrap_or("None."),
+        user_prompt.trim()
+    )
+}
+
+fn vision_assist_prompt(
+    user_prompt: &str,
+    user_negative_prompt: Option<&str>,
+    reference: &ReferenceSummary,
+) -> String {
+    let intent = match reference.intent {
+        ReferenceIntent::Guide => "guide",
+        ReferenceIntent::Edit => "edit",
+    };
+    format!(
+        "You are Vision Assist for a local image generation tool.\nReturn only JSON matching the schema.\nAnalyze the attached reference image and summarize it into machine-facing generation cues.\nBe concrete, compact, and visually specific.\nDo not mention your own reasoning.\nDo not write a final generator prompt.\nPrefer short descriptive phrases over generic labels.\nAvoid repeating the same noun across every field.\nIf the subject is an animal or bird, try to include visible traits, pose, perch, habitat, colors, or framing instead of only the class name.\nGood example: 'kookaburra perched on branch', 'leafy outdoor setting', 'side-profile wildlife photo', 'soft daylight'.\nWeak example: 'bird', 'bird', 'bird'.\nUse palette for visible colors only.\nUse important_objects for concrete visible objects, not abstract style words.\nFor guide intent, focus on what traits are useful to borrow.\nFor edit intent, focus on what should be preserved and what the user appears to want changed.\nIf a field is unclear, keep it short instead of inventing odd details.\nReference intent: {}.\nReference summary: {}.\nOriginal negative prompt: {}.\nOriginal user prompt: {}",
+        intent,
+        reference.note,
+        user_negative_prompt.unwrap_or("None."),
+        user_prompt.trim()
+    )
+}
+
+fn compact_vision_assist_prompt(
+    user_prompt: &str,
+    user_negative_prompt: Option<&str>,
+    reference: &ReferenceSummary,
+) -> String {
+    let intent = match reference.intent {
+        ReferenceIntent::Guide => "guide",
+        ReferenceIntent::Edit => "edit",
+    };
+    format!(
+        "You are Vision Assist for a local image generation tool.\nReturn only JSON matching the schema.\nKeep the output simple and short.\nDescribe only the obvious visible subject, environment, framing, lighting, colors, and concrete objects.\nAvoid long lists.\nAvoid repeating the same phrase in every field.\nIf uncertain, leave a short plain phrase instead of inventing details.\nReference intent: {}.\nReference summary: {}.\nOriginal negative prompt: {}.\nOriginal user prompt: {}",
+        intent,
+        reference.note,
         user_negative_prompt.unwrap_or("None."),
         user_prompt.trim()
     )
@@ -1166,11 +1581,61 @@ fn reference_summary(reference: Option<&ReferenceSummary>) -> String {
         .unwrap_or_else(|| "No reference asset selected.".to_string())
 }
 
+fn vision_summary(vision: Option<&VisionAssistBrief>) -> String {
+    let Some(vision) = vision else {
+        return "No vision analysis available.".to_string();
+    };
+
+    let mut parts = Vec::new();
+    if let Some(value) = optional_text(&vision.primary_subject) {
+        parts.push(format!("subject: {value}"));
+    }
+    if let Some(value) = optional_text(&vision.setting) {
+        parts.push(format!("setting: {value}"));
+    }
+    if let Some(value) = optional_text(&vision.composition) {
+        parts.push(format!("composition: {value}"));
+    }
+    if let Some(value) = optional_text(&vision.camera_framing) {
+        parts.push(format!("framing: {value}"));
+    }
+    if let Some(value) = optional_text(&vision.lighting) {
+        parts.push(format!("lighting: {value}"));
+    }
+    if !vision.style_keywords.is_empty() {
+        parts.push(format!("style: {}", vision.style_keywords.join(", ")));
+    }
+    if !vision.palette.is_empty() {
+        parts.push(format!("palette: {}", vision.palette.join(", ")));
+    }
+    if !vision.important_objects.is_empty() {
+        parts.push(format!("objects: {}", vision.important_objects.join(", ")));
+    }
+    if !vision.preserve.is_empty() {
+        parts.push(format!("preserve: {}", vision.preserve.join(", ")));
+    }
+    if !vision.change_targets.is_empty() {
+        parts.push(format!("change: {}", vision.change_targets.join(", ")));
+    }
+    if !vision.avoid.is_empty() {
+        parts.push(format!("avoid: {}", vision.avoid.join(", ")));
+    }
+
+    if parts.is_empty() {
+        "Vision analysis was empty.".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
 fn prompt_assist_note(
     mode: PromptAssistMode,
     brief: &PromptAssistBrief,
     kind: MediaKind,
     supports_voice_output: bool,
+    vision_model: Option<&ModelInfo>,
+    vision_model_was_auto_selected: bool,
+    vision_brief: Option<&VisionAssistBrief>,
 ) -> String {
     let assumption_count = brief.assumptions.len();
     let focus_count = brief.focus_tags.len();
@@ -1184,13 +1649,194 @@ fn prompt_assist_note(
         ),
     };
 
-    if kind == MediaKind::Audio && supports_voice_output && !base.is_empty() {
+    let base = if kind == MediaKind::Audio && supports_voice_output && !base.is_empty() {
         format!(
             "{base} Chatty-art also separated the spoken words from the delivery direction so the whole request is not read aloud verbatim."
         )
     } else {
         base
+    };
+
+    if let (Some(model), Some(vision_brief)) = (vision_model, vision_brief) {
+        let lower = model.name.to_ascii_lowercase();
+        let lead_in = if vision_model_was_auto_selected && lower.contains("qwen2.5-vl") {
+            format!(
+                " Vision Assist Auto chose {} as the primary image-analysis helper before prompt expansion.",
+                model.name
+            )
+        } else if vision_model_was_auto_selected && lower.contains("llava") {
+            format!(
+                " Vision Assist Auto fell back to {} as the secondary image-analysis helper before prompt expansion.",
+                model.name
+            )
+        } else {
+            format!(
+                " Vision Assist used {} to analyze the selected image reference before prompt expansion.",
+                model.name
+            )
+        };
+        let vision_note = format!("{lead_in} {}", vision_summary(Some(vision_brief)));
+        if base.trim().is_empty() {
+            vision_note.trim().to_string()
+        } else {
+            format!("{base}{vision_note}")
+        }
+    } else {
+        base
     }
+}
+
+fn fallback_prompt_assist_note(
+    vision_model: Option<&ModelInfo>,
+    vision_model_was_auto_selected: bool,
+    vision_brief: Option<&VisionAssistBrief>,
+) -> String {
+    let mut note = "Prompt Assist could not extract a clean brief, so Chatty-art fell back to a simpler local handoff.".to_string();
+    if let (Some(model), Some(vision_brief)) = (vision_model, vision_brief) {
+        let lower = model.name.to_ascii_lowercase();
+        let lead_in = if vision_model_was_auto_selected && lower.contains("qwen2.5-vl") {
+            format!(
+                "Vision Assist Auto chose {} as the primary image-analysis helper.",
+                model.name
+            )
+        } else if vision_model_was_auto_selected && lower.contains("llava") {
+            format!(
+                "Vision Assist Auto fell back to {} as the secondary image-analysis helper.",
+                model.name
+            )
+        } else {
+            format!(
+                "Vision Assist still used {} to analyze the selected image reference.",
+                model.name
+            )
+        };
+        note.push(' ');
+        note.push_str(&format!("{lead_in} {}", vision_summary(Some(vision_brief))));
+    }
+    note
+}
+
+fn normalize_vision_assist_brief(mut brief: VisionAssistBrief) -> VisionAssistBrief {
+    brief.primary_subject = brief.primary_subject.trim().to_string();
+    brief.setting = brief.setting.trim().to_string();
+    brief.composition = brief.composition.trim().to_string();
+    brief.camera_framing = brief.camera_framing.trim().to_string();
+    brief.lighting = brief.lighting.trim().to_string();
+    let field_texts = [
+        brief.primary_subject.as_str(),
+        brief.setting.as_str(),
+        brief.composition.as_str(),
+        brief.camera_framing.as_str(),
+        brief.lighting.as_str(),
+    ];
+    let repeated_low_signal_terms = repeated_low_signal_terms(&field_texts);
+    brief.primary_subject = normalize_vision_text_field(&brief.primary_subject, &repeated_low_signal_terms);
+    brief.setting = normalize_vision_text_field(&brief.setting, &repeated_low_signal_terms);
+    brief.composition = normalize_vision_text_field(&brief.composition, &repeated_low_signal_terms);
+    brief.camera_framing = normalize_vision_text_field(&brief.camera_framing, &repeated_low_signal_terms);
+    brief.lighting = normalize_vision_text_field(&brief.lighting, &repeated_low_signal_terms);
+    brief.style_keywords = normalize_vision_items(&brief.style_keywords, 6, &repeated_low_signal_terms);
+    brief.palette = normalize_vision_items(&brief.palette, 6, &HashSet::new());
+    brief.important_objects = normalize_vision_items(&brief.important_objects, 8, &repeated_low_signal_terms);
+    brief.preserve = normalize_vision_items(&brief.preserve, 8, &repeated_low_signal_terms);
+    brief.change_targets = normalize_vision_items(&brief.change_targets, 8, &repeated_low_signal_terms);
+    brief.avoid = normalize_vision_items(&brief.avoid, 8, &repeated_low_signal_terms);
+    brief
+}
+
+fn expand_compact_vision_assist_brief(brief: CompactVisionAssistBrief) -> VisionAssistBrief {
+    let composition = if !brief.camera_framing.trim().is_empty() {
+        brief.camera_framing.clone()
+    } else {
+        brief.setting.clone()
+    };
+    VisionAssistBrief {
+        primary_subject: brief.primary_subject,
+        setting: brief.setting,
+        composition,
+        camera_framing: brief.camera_framing,
+        lighting: brief.lighting,
+        style_keywords: Vec::new(),
+        palette: brief.palette,
+        important_objects: brief.important_objects,
+        preserve: brief.preserve,
+        change_targets: Vec::new(),
+        avoid: brief.avoid,
+    }
+}
+
+fn prefers_compact_vision_retry(model: &ModelInfo) -> bool {
+    model.name.to_ascii_lowercase().contains("moondream")
+}
+
+fn format_vision_assist_error(error: InvokeError) -> anyhow::Error {
+    match error {
+        InvokeError::Runtime(error) => error,
+        InvokeError::Parse {
+            raw_output,
+            stderr,
+            extracted_json: _,
+        } => anyhow!(
+            "Vision Assist could not extract a clean JSON analysis. stdout: {} stderr: {}",
+            raw_output.trim(),
+            stderr.trim()
+        ),
+    }
+}
+
+fn normalize_vision_items(values: &[String], limit: usize, banned_terms: &HashSet<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .iter()
+        .map(|value| normalize_vision_text_field(value, banned_terms))
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.to_ascii_lowercase()))
+        .take(limit)
+        .collect()
+}
+
+fn normalize_vision_text_field(value: &str, banned_terms: &HashSet<String>) -> String {
+    let trimmed = value.trim().trim_matches(',').trim().to_string();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    if banned_terms.contains(&lowered) {
+        return String::new();
+    }
+    trimmed
+}
+
+fn repeated_low_signal_terms(values: &[&str]) -> HashSet<String> {
+    let mut counts = std::collections::HashMap::new();
+    for value in values {
+        let lowered = value.trim().trim_matches(',').to_ascii_lowercase();
+        if lowered.is_empty() || !is_low_signal_vision_term(&lowered) {
+            continue;
+        }
+        *counts.entry(lowered).or_insert(0usize) += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(term, count)| (count >= 2).then_some(term))
+        .collect()
+}
+
+fn is_low_signal_vision_term(term: &str) -> bool {
+    matches!(
+        term,
+        "bird"
+            | "animal"
+            | "creature"
+            | "subject"
+            | "object"
+            | "image"
+            | "photo"
+            | "picture"
+            | "scene"
+            | "outdoor"
+            | "nature"
+    )
 }
 
 pub fn derive_spoken_text_heuristic(user_prompt: &str) -> String {
@@ -3692,6 +4338,7 @@ mod tests {
             GenerationStyle::Realism,
             MediaKind::Image,
             PromptAssistMode::Gentle,
+            None,
             None,
             false,
         );

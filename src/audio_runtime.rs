@@ -3,12 +3,16 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail};
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use serde::Deserialize;
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::{
@@ -158,6 +162,7 @@ pub async fn generate_with_audio_runtime(
     reference_asset: Option<&InputAsset>,
     used_seed: u32,
     output_path: &Path,
+    canceled: &AtomicBool,
 ) -> Result<AudioGenerationResult> {
     let family = model.family.to_ascii_lowercase();
     if family.contains("outetts") {
@@ -171,6 +176,7 @@ pub async fn generate_with_audio_runtime(
             reference_asset,
             used_seed,
             output_path,
+            canceled,
         )
         .await;
     }
@@ -183,6 +189,7 @@ pub async fn generate_with_audio_runtime(
             reference_asset,
             used_seed,
             output_path,
+            canceled,
         )
         .await;
     }
@@ -557,6 +564,7 @@ async fn generate_with_outetts(
     reference_asset: Option<&InputAsset>,
     used_seed: u32,
     output_path: &Path,
+    canceled: &AtomicBool,
 ) -> Result<AudioGenerationResult> {
     let probe = probe_outetts_runtime(audio_runtime_dir);
     if !probe.ready {
@@ -597,6 +605,9 @@ async fn generate_with_outetts(
     let mut rendered_segments = Vec::new();
 
     for (index, segment) in segments.iter().enumerate() {
+        if canceled.load(Ordering::SeqCst) {
+            bail!("Generation canceled.");
+        }
         let segment_output_path = request_dir.join(format!("segment-{index:02}.wav"));
         let request_path = request_dir.join(format!("segment-{index:02}.json"));
         let segment_label = normalized_audio_label(segment);
@@ -641,6 +652,7 @@ async fn generate_with_outetts(
                 "--request".to_string(),
                 request_path.to_string_lossy().to_string(),
             ],
+            canceled,
         )
         .await;
 
@@ -701,6 +713,7 @@ async fn generate_with_stable_audio(
     reference_asset: Option<&InputAsset>,
     used_seed: u32,
     output_path: &Path,
+    canceled: &AtomicBool,
 ) -> Result<AudioGenerationResult> {
     if reference_asset.is_some() {
         bail!(
@@ -727,6 +740,9 @@ async fn generate_with_stable_audio(
     let mut rendered_segments = Vec::new();
 
     for (index, segment) in segments.iter().enumerate() {
+        if canceled.load(Ordering::SeqCst) {
+            bail!("Generation canceled.");
+        }
         let segment_output_path = request_dir.join(format!("segment-{index:02}.wav"));
         let request_path = request_dir.join(format!("segment-{index:02}.json"));
         let prompt = compose_stable_audio_segment_prompt(request, segment);
@@ -762,6 +778,7 @@ async fn generate_with_stable_audio(
                 "--request".to_string(),
                 request_path.to_string_lossy().to_string(),
             ],
+            canceled,
         )
         .await;
 
@@ -1470,6 +1487,7 @@ struct PythonRunResult {
 async fn run_python_async_with_interpreter<I, S>(
     interpreter: &Path,
     args: I,
+    canceled: &AtomicBool,
 ) -> Result<PythonRunResult>
 where
     I: IntoIterator<Item = S>,
@@ -1480,12 +1498,25 @@ where
         .map(|value| value.as_ref().to_string())
         .collect::<Vec<_>>();
 
-    let output = tokio::process::Command::new(interpreter)
+    let output_future = tokio::process::Command::new(interpreter)
         .args(args.iter())
         .stdin(Stdio::null())
-        .output()
-        .await
-        .context("failed to start the requested Python interpreter")?;
+        .kill_on_drop(true)
+        .output();
+    tokio::pin!(output_future);
+
+    let output = loop {
+        tokio::select! {
+            output = &mut output_future => {
+                break output.context("failed to start the requested Python interpreter")?;
+            }
+            _ = sleep(Duration::from_millis(150)) => {
+                if canceled.load(Ordering::SeqCst) {
+                    bail!("Generation canceled.");
+                }
+            }
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1654,6 +1685,8 @@ mod tests {
             reference_intent: ReferenceIntent::Guide,
             end_reference_asset: None,
             control_reference_asset: None,
+            selected_prompt_model: None,
+            selected_vision_model: None,
             selected_lora: None,
             selected_lora_weight: None,
             selected_loras: Vec::new(),
@@ -1666,6 +1699,9 @@ mod tests {
             audio_segments: vec![],
             manual_focus_tags: Vec::new(),
             manual_assumptions: Vec::new(),
+            manual_preserve_items: Vec::new(),
+            manual_change_targets: Vec::new(),
+            manual_avoid_items: Vec::new(),
         };
 
         let prompt = compose_stable_audio_segment_prompt(
