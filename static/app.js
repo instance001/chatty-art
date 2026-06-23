@@ -38,6 +38,8 @@ const state = {
 };
 
 let lastBridgeStatusFingerprint = "";
+let startupSplashDismissed = false;
+let startupSplashTimerHandle = null;
 
 const MAX_RUNTIME_SEED = 4294967295;
 const MODE_DEFAULTS = {
@@ -220,6 +222,7 @@ const elements = {
   actionButtons: [...document.querySelectorAll(".action-button")],
   trayFilters: [...document.querySelectorAll(".tray-filter")],
   previewHandoffPanel: document.getElementById("previewHandoffPanel"),
+  startupSplash: document.getElementById("startupSplash"),
 };
 
 const GPU_TELEMETRY_WIDTH = 180;
@@ -344,6 +347,37 @@ function handleTrackedSettingMutation() {
   renderModelSummary();
 }
 
+function dismissStartupSplash() {
+  if (startupSplashDismissed || !elements.startupSplash) {
+    return;
+  }
+  startupSplashDismissed = true;
+  if (startupSplashTimerHandle) {
+    window.clearTimeout(startupSplashTimerHandle);
+    startupSplashTimerHandle = null;
+  }
+  elements.startupSplash.classList.add("hidden");
+  document.body.classList.remove("splash-active");
+  window.removeEventListener("keydown", handleStartupSplashKeydown);
+}
+
+function handleStartupSplashKeydown(event) {
+  if (event.key === " " || event.key === "Enter" || event.key === "Escape") {
+    event.preventDefault();
+    dismissStartupSplash();
+  }
+}
+
+function initStartupSplash() {
+  if (!elements.startupSplash) {
+    return;
+  }
+  document.body.classList.add("splash-active");
+  elements.startupSplash.addEventListener("click", dismissStartupSplash);
+  window.addEventListener("keydown", handleStartupSplashKeydown);
+  startupSplashTimerHandle = window.setTimeout(dismissStartupSplash, 3000);
+}
+
 trackedSettingInputs.forEach((input) => {
   input.addEventListener("change", handleTrackedSettingMutation);
   input.addEventListener("input", handleTrackedSettingMutation);
@@ -439,6 +473,7 @@ elements.audioSegmentsList.addEventListener("click", (event) => {
 });
 
 connectSocket();
+initStartupSplash();
 applyModeDefaults(state.generationStyle);
 renderStyleMode();
 renderPromptWorkflowMode();
