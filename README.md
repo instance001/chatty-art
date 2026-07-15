@@ -37,7 +37,10 @@ Chatty-art is a simple local image/GIF/video/audio generator with:
 - Hosted LoRA inbox import from sibling modules through the approved `lora_imports` bridge lane
 - Explicit `Delete Selected` cleanup for saved outputs, using the same checkbox surface as handoff
 
-If you want a true beginner walkthrough, start with [USER_MANUAL.md](./USER_MANUAL.md).
+## Related Docs
+
+- [USER_MANUAL.md](./USER_MANUAL.md)
+- [GLOSSARY.md](./GLOSSARY.md)
 
 ## License
 
