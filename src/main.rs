@@ -1,7 +1,10 @@
+mod app_config;
 mod audio_runtime;
+mod cloud_ai;
 mod gguf;
 mod render;
 mod runtime;
+mod secrets;
 mod sdcpp;
 mod types;
 
@@ -46,23 +49,35 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
+    app_config::load_cloud_config,
     audio_runtime::{
         detect_audio_runtime_package_support, detect_audio_runtime_support,
         generate_with_audio_runtime,
+    },
+    cloud_ai::{
+        default_base_url, default_capabilities, generate_cloud_image, generate_cloud_speech,
+        generate_cloud_video, validate_openai_video_request, verify_media_generation,
+        verify_prompt_assist, verify_vision_assist,
     },
     gguf::inspect_gguf,
     render::{render_audio, render_image, render_video},
     runtime::{
         build_audio_plan, build_image_plan, build_reference_summary, build_video_plan,
-        compile_prompt, derive_speech_direction_heuristic, derive_spoken_text_heuristic,
+        compile_prompt, compile_prompt_cloud, derive_speech_direction_heuristic,
+        derive_spoken_text_heuristic,
     },
     sdcpp::{detect_sdcpp_support, generate_with_sdcpp, realism_runtime_status},
     types::{
         AssetSource, BackendRuntimeStatus, CancelAccepted, CancelRequest, EstimateConfidence,
-        GenerateAccepted, GenerateRequest, GenerationSettings, GenerationStyle, HardwareProfile,
-        InputAsset, LoraInfo, MediaKind, ModelBackend, ModelInfo, OutputEntry, PrepareResponse,
-        PromptAssistMode, ReferenceSummary, ResolutionPreset, RuntimeAcceleration, RuntimeStatus,
-        ServerEvent, TimeEstimate, VideoResolutionPreset,
+        CloudConfig, CloudLaneAssignmentsResponse, CloudLaneAssignmentsUpdateRequest,
+        CloudLaneAssignmentsUpdateResponse, CloudProviderDeleteRequest, CloudProviderDeleteResponse,
+        CloudProviderEntry, CloudProviderKind, CloudProviderSummary, CloudProviderUpsertRequest,
+        CloudProviderUpsertResponse, CloudProviderVerifyRequest, CloudProviderVerifyResponse,
+        CloudProvidersResponse, GenerateAccepted, GenerateRequest, GenerationSettings,
+        GenerationStyle, HardwareProfile, InputAsset, LoraInfo, MediaKind, ModelBackend,
+        ModelInfo, OutputEntry, PrepareResponse, PromptAssistMode, ReferenceSummary,
+        ResolutionPreset, RuntimeAcceleration, RuntimeStatus, ServerEvent, TimeEstimate,
+        VideoResolutionPreset,
     },
 };
 
@@ -75,6 +90,9 @@ struct AppPaths {
     input_dir: PathBuf,
     outputs_dir: PathBuf,
     runtime_dir: PathBuf,
+    config_dir: PathBuf,
+    config_path: PathBuf,
+    secrets_path: PathBuf,
     diffuse_runtime_dir: PathBuf,
     audio_runtime_dir: PathBuf,
 }
@@ -87,6 +105,9 @@ impl AppPaths {
             input_dir: root.join("input"),
             outputs_dir: root.join("outputs"),
             runtime_dir: root.join("runtime"),
+            config_dir: root.join("runtime").join("config"),
+            config_path: app_config::default_config_path(&root.join("runtime")),
+            secrets_path: secrets::default_secrets_path(&root.join("runtime")),
             diffuse_runtime_dir: root.join("diffuse_runtime"),
             audio_runtime_dir: root.join("audio_runtime"),
         })
@@ -102,6 +123,7 @@ impl AppPaths {
         std::fs::create_dir_all(self.outputs_dir.join("video"))?;
         std::fs::create_dir_all(self.outputs_dir.join("audio"))?;
         std::fs::create_dir_all(&self.audio_runtime_dir)?;
+        std::fs::create_dir_all(&self.config_dir)?;
         Ok(())
     }
 }
@@ -144,6 +166,7 @@ fn is_chatty_art_root(path: &Path) -> bool {
 #[derive(Clone)]
 struct AppState {
     paths: Arc<AppPaths>,
+    cloud_config: Arc<RwLock<CloudConfig>>,
     events: broadcast::Sender<ServerEvent>,
     generation_gate: Arc<Semaphore>,
     gpu_telemetry: Arc<RwLock<GpuTelemetrySnapshot>>,
@@ -198,6 +221,9 @@ struct PlannerTraceSidecar {
     style: GenerationStyle,
     backend: ModelBackend,
     model: String,
+    prompt_assist_route: Option<String>,
+    vision_assist_route: Option<String>,
+    output_route: String,
     prompt: String,
     note: String,
     used_fallback: bool,
@@ -213,6 +239,9 @@ struct PromptAssistTraceSidecar {
     style: GenerationStyle,
     assist_mode: PromptAssistMode,
     generation_model: String,
+    prompt_assist_route: Option<String>,
+    vision_assist_route: Option<String>,
+    output_route: String,
     interpreter_model: String,
     original_prompt: String,
     compiled_prompt: String,
@@ -264,6 +293,21 @@ fn ensure_not_canceled(control: &Arc<JobControl>) -> Result<()> {
     Ok(())
 }
 
+async fn await_cancelable<F, T>(control: &Arc<JobControl>, future: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::pin!(future);
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            _ = interval.tick() => ensure_not_canceled(control)?,
+        }
+    }
+}
+
 fn is_cancellation_error(error: &anyhow::Error) -> bool {
     error
         .to_string()
@@ -285,8 +329,10 @@ async fn main() -> Result<()> {
     let (events, _) = broadcast::channel(256);
     let gpu_telemetry = Arc::new(RwLock::new(initial_gpu_telemetry()));
     let hardware_profile = Arc::new(detect_hardware_profile().await);
+    let cloud_config = Arc::new(RwLock::new(load_cloud_config(&paths.config_path)?));
     let state = AppState {
         paths: paths.clone(),
+        cloud_config,
         events,
         generation_gate: Arc::new(Semaphore::new(1)),
         gpu_telemetry: gpu_telemetry.clone(),
@@ -305,6 +351,12 @@ async fn main() -> Result<()> {
         .route("/api/runtime", get(runtime_status))
         .route("/api/hardware", get(hardware_profile_status))
         .route("/api/telemetry/gpu", get(gpu_telemetry_status))
+        .route("/api/cloud/providers", get(list_cloud_providers))
+        .route("/api/cloud/providers", post(save_cloud_provider))
+        .route("/api/cloud/providers/delete", post(delete_cloud_provider))
+        .route("/api/cloud/providers/verify", post(verify_cloud_provider))
+        .route("/api/cloud/lanes", get(get_cloud_lane_assignments))
+        .route("/api/cloud/lanes", post(update_cloud_lane_assignments))
         .route("/api/assets", get(list_assets))
         .route("/api/outputs", get(list_outputs))
         .route("/api/outputs/delete", post(delete_outputs))
@@ -433,6 +485,403 @@ async fn gpu_telemetry_status(State(state): State<AppState>) -> ApiResult<GpuTel
 
 async fn hardware_profile_status(State(state): State<AppState>) -> ApiResult<HardwareProfile> {
     Ok(Json((*state.hardware_profile).clone()))
+}
+
+async fn list_cloud_providers(State(state): State<AppState>) -> ApiResult<CloudProvidersResponse> {
+    let config = state.cloud_config.read().await.clone();
+    Ok(Json(CloudProvidersResponse {
+        api_key_lanes_enabled: config.api_key_lanes_enabled,
+        providers: config
+            .cloud_providers
+            .iter()
+            .map(|entry| summarize_provider(&state.paths, entry))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(internal_error)?,
+    }))
+}
+
+async fn save_cloud_provider(
+    State(state): State<AppState>,
+    Json(request): Json<CloudProviderUpsertRequest>,
+) -> ApiResult<CloudProviderUpsertResponse> {
+    let mut config = state.cloud_config.write().await;
+    config.api_key_lanes_enabled = true;
+
+    let provider_id = request
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let provider_kind = request.provider_kind;
+    let enabled = request.enabled;
+    let mut entry = CloudProviderEntry {
+        id: provider_id.clone(),
+        display_name: request.display_name.trim().to_string(),
+        provider_kind,
+        base_url: request.base_url.trim().trim_end_matches('/').to_string(),
+        prompt_assist_model_name: request.prompt_assist_model_name.trim().to_string(),
+        vision_model_name: request.vision_model_name.trim().to_string(),
+        image_generation_model_name: request.image_generation_model_name.trim().to_string(),
+        video_generation_model_name: request.video_generation_model_name.trim().to_string(),
+        audio_generation_model_name: request.audio_generation_model_name.trim().to_string(),
+        audio_generation_voice: request.audio_generation_voice.trim().to_string(),
+        enabled,
+        capabilities: default_capabilities(provider_kind),
+        prompt_assist_verification: Default::default(),
+        vision_assist_verification: Default::default(),
+        media_generation_verification: Default::default(),
+    };
+
+    if entry.base_url.is_empty() {
+        entry.base_url = default_base_url(provider_kind).to_string();
+    }
+    let parsed_base_url = reqwest::Url::parse(&entry.base_url).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Enter a full cloud base URL, including http:// or https://.".to_string(),
+        )
+    })?;
+    if !matches!(parsed_base_url.scheme(), "http" | "https") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cloud base URLs must start with http:// or https://.".to_string(),
+        ));
+    }
+    validate_provider_entry_against_capabilities(&entry)?;
+    if entry.display_name.is_empty() {
+        entry.display_name = if !entry.prompt_assist_model_name.is_empty() {
+            entry.prompt_assist_model_name.clone()
+        } else if !entry.vision_model_name.is_empty() {
+            entry.vision_model_name.clone()
+        } else if !entry.image_generation_model_name.is_empty() {
+            entry.image_generation_model_name.clone()
+        } else if !entry.video_generation_model_name.is_empty() {
+            entry.video_generation_model_name.clone()
+        } else if !entry.audio_generation_model_name.is_empty() {
+            entry.audio_generation_model_name.clone()
+        } else {
+            provider_id.clone()
+        };
+    }
+    if entry.prompt_assist_model_name.is_empty()
+        && entry.vision_model_name.is_empty()
+        && entry.image_generation_model_name.is_empty()
+        && entry.video_generation_model_name.is_empty()
+        && entry.audio_generation_model_name.is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Set at least one cloud model name before saving this cloud account or route."
+                .to_string(),
+        ));
+    }
+
+    if let Some(api_key) = request.api_key.as_deref().map(str::trim) {
+        if !api_key.is_empty() {
+            secrets::save_api_key(&state.paths.secrets_path, &provider_id, api_key)
+                .map_err(internal_error)?;
+        }
+    }
+
+    if !secrets::has_api_key(&state.paths.secrets_path, &provider_id).map_err(internal_error)? {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Enter an API key before saving this cloud account or route.".to_string(),
+        ));
+    }
+
+    if let Some(existing) = config
+        .cloud_providers
+        .iter_mut()
+        .find(|existing| existing.id == provider_id)
+    {
+        entry.prompt_assist_verification = existing.prompt_assist_verification.clone();
+        entry.vision_assist_verification = existing.vision_assist_verification.clone();
+        entry.media_generation_verification = existing.media_generation_verification.clone();
+        existing.clone_from(&entry);
+    } else {
+        config.cloud_providers.push(entry.clone());
+    }
+
+    app_config::save_cloud_config(&state.paths.config_path, &config).map_err(internal_error)?;
+    let summary = summarize_provider(&state.paths, &entry).map_err(internal_error)?;
+    Ok(Json(CloudProviderUpsertResponse {
+        provider: summary,
+        note: "Saved cloud account or route.".to_string(),
+    }))
+}
+
+fn validate_provider_entry_against_capabilities(
+    entry: &CloudProviderEntry,
+) -> Result<(), (StatusCode, String)> {
+    if !entry.capabilities.text_assist && !entry.prompt_assist_model_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "This saved account or route is not wired for Prompt Assist yet.".to_string(),
+        ));
+    }
+    if !entry.capabilities.vision_assist && !entry.vision_model_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "This saved account or route is not wired for Vision Assist yet.".to_string(),
+        ));
+    }
+    if !entry.capabilities.image_generation && !entry.image_generation_model_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "This saved account or route is not wired for cloud image generation yet.".to_string(),
+        ));
+    }
+    if !entry.capabilities.video_generation && !entry.video_generation_model_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "This saved account or route is not wired for cloud video generation yet.".to_string(),
+        ));
+    }
+    if !entry.capabilities.audio_generation && !entry.audio_generation_model_name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "This saved account or route is not wired for cloud speech generation yet.".to_string(),
+        ));
+    }
+    if !entry.capabilities.audio_generation && !entry.audio_generation_voice.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Save a voice or speaker id only on routes that already support cloud speech generation.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn delete_cloud_provider(
+    State(state): State<AppState>,
+    Json(request): Json<CloudProviderDeleteRequest>,
+) -> ApiResult<CloudProviderDeleteResponse> {
+    let mut config = state.cloud_config.write().await;
+    let provider_id = request.id.trim().to_string();
+    if provider_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Provider id is required.".to_string()));
+    }
+    config.cloud_providers.retain(|entry| entry.id != provider_id);
+    if config.lane_assignments.prompt_assist == format!("cloud:{provider_id}") {
+        config.lane_assignments.prompt_assist = "local_auto".to_string();
+    }
+    if config.lane_assignments.vision_assist == format!("cloud:{provider_id}") {
+        config.lane_assignments.vision_assist = "local_auto".to_string();
+    }
+    if config.lane_assignments.media_generation == format!("cloud:{provider_id}") {
+        config.lane_assignments.media_generation = "local_only".to_string();
+    }
+    secrets::delete_api_key(&state.paths.secrets_path, &provider_id).map_err(internal_error)?;
+    app_config::save_cloud_config(&state.paths.config_path, &config).map_err(internal_error)?;
+    Ok(Json(CloudProviderDeleteResponse {
+        id: provider_id,
+        note: "Deleted cloud account or route.".to_string(),
+    }))
+}
+
+async fn verify_cloud_provider(
+    State(state): State<AppState>,
+    Json(request): Json<CloudProviderVerifyRequest>,
+) -> ApiResult<CloudProviderVerifyResponse> {
+    let provider_id = request.id.trim().to_string();
+    if provider_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Provider id is required.".to_string()));
+    }
+    let maybe_entry = {
+        let config = state.cloud_config.read().await;
+        config
+            .cloud_providers
+            .iter()
+            .find(|entry| entry.id == provider_id)
+            .cloned()
+    };
+    let entry = if let Some(entry) = maybe_entry {
+        entry
+    } else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Cloud account or route was not found.".to_string(),
+        ));
+    };
+    let api_key = secrets::read_api_key(&state.paths.secrets_path, &provider_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "No API key is stored for that cloud account or route.".to_string(),
+            )
+        })?;
+
+    let lane = request
+        .lane
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("prompt_assist");
+    let verification_note = match lane {
+        "vision_assist" => match verify_vision_assist(&entry, &api_key).await {
+            Ok(note) => note,
+            Err(error) => error.to_string(),
+        },
+        "media_generation" => match verify_media_generation(&entry, &api_key).await {
+            Ok(note) => note,
+            Err(error) => error.to_string(),
+        },
+        _ => match verify_prompt_assist(&entry, &api_key).await {
+            Ok(note) => note,
+            Err(error) => error.to_string(),
+        },
+    };
+    let checked_at_unix_ms = now_unix_ms();
+
+    let summary = {
+        let mut config = state.cloud_config.write().await;
+        let updated = config
+            .cloud_providers
+            .iter_mut()
+            .find(|existing| existing.id == provider_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    "Cloud account or route disappeared during verification.".to_string(),
+                )
+            })?;
+        if lane == "vision_assist" {
+            updated.vision_assist_verification.status = verification_note.clone();
+            updated.vision_assist_verification.checked_at_unix_ms = checked_at_unix_ms;
+        } else if lane == "media_generation" {
+            updated.media_generation_verification.status = verification_note.clone();
+            updated.media_generation_verification.checked_at_unix_ms = checked_at_unix_ms;
+        } else {
+            updated.prompt_assist_verification.status = verification_note.clone();
+            updated.prompt_assist_verification.checked_at_unix_ms = checked_at_unix_ms;
+        }
+        let snapshot = updated.clone();
+        app_config::save_cloud_config(&state.paths.config_path, &config).map_err(internal_error)?;
+        summarize_provider(&state.paths, &snapshot).map_err(internal_error)?
+    };
+
+    Ok(Json(CloudProviderVerifyResponse {
+        provider: summary,
+        note: verification_note,
+    }))
+}
+
+async fn get_cloud_lane_assignments(
+    State(state): State<AppState>,
+) -> ApiResult<CloudLaneAssignmentsResponse> {
+    let config = state.cloud_config.read().await;
+    Ok(Json(CloudLaneAssignmentsResponse {
+        lane_assignments: config.lane_assignments.clone(),
+    }))
+}
+
+async fn update_cloud_lane_assignments(
+    State(state): State<AppState>,
+    Json(request): Json<CloudLaneAssignmentsUpdateRequest>,
+) -> ApiResult<CloudLaneAssignmentsUpdateResponse> {
+    let mut config = state.cloud_config.write().await;
+    let normalized = app_config::normalize_lane_assignments_for_providers(
+        request.lane_assignments,
+        &config.cloud_providers,
+    );
+    config.lane_assignments = normalized.clone();
+    config.api_key_lanes_enabled = true;
+    app_config::save_cloud_config(&state.paths.config_path, &config).map_err(internal_error)?;
+    Ok(Json(CloudLaneAssignmentsUpdateResponse {
+        lane_assignments: normalized,
+        note: "Saved cloud lane assignments.".to_string(),
+    }))
+}
+
+async fn resolve_prompt_assist_cloud_target(
+    state: &AppState,
+) -> Result<Option<PromptAssistCloudTarget>> {
+    let config = state.cloud_config.read().await.clone();
+    let selection = config.lane_assignments.prompt_assist.trim().to_string();
+    let Some(provider_id) = selection.strip_prefix("cloud:").map(str::trim) else {
+        return Ok(None);
+    };
+    if provider_id.is_empty() {
+        return Ok(None);
+    }
+    let entry = config
+        .cloud_providers
+        .iter()
+        .find(|entry| entry.id == provider_id && entry.enabled)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("The selected Prompt Assist cloud route is missing or disabled."))?;
+    let api_key = secrets::read_api_key(&state.paths.secrets_path, provider_id)?
+        .ok_or_else(|| anyhow::anyhow!("The selected Prompt Assist cloud route does not have a saved API key."))?;
+    Ok(Some(PromptAssistCloudTarget { entry, api_key }))
+}
+
+async fn resolve_vision_assist_cloud_target(
+    state: &AppState,
+) -> Result<Option<VisionAssistCloudTarget>> {
+    let config = state.cloud_config.read().await.clone();
+    let selection = config.lane_assignments.vision_assist.trim().to_string();
+    let Some(provider_id) = selection.strip_prefix("cloud:").map(str::trim) else {
+        return Ok(None);
+    };
+    if provider_id.is_empty() {
+        return Ok(None);
+    }
+    let entry = config
+        .cloud_providers
+        .iter()
+        .find(|entry| entry.id == provider_id && entry.enabled)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("The selected Vision Assist cloud route is missing or disabled."))?;
+    if !entry.capabilities.vision_assist {
+        bail!("The selected Vision Assist cloud route is not marked as vision capable.");
+    }
+    if entry.vision_model_name.trim().is_empty() {
+        bail!("The selected Vision Assist cloud route does not have a Vision Assist model configured.");
+    }
+    let api_key = secrets::read_api_key(&state.paths.secrets_path, provider_id)?
+        .ok_or_else(|| anyhow::anyhow!("The selected Vision Assist cloud route does not have a saved API key."))?;
+    Ok(Some(VisionAssistCloudTarget { entry, api_key }))
+}
+
+async fn resolve_media_generation_cloud_target(
+    state: &AppState,
+) -> Result<Option<MediaGenerationCloudTarget>> {
+    let config = state.cloud_config.read().await.clone();
+    let selection = config.lane_assignments.media_generation.trim().to_string();
+    let Some(provider_id) = selection.strip_prefix("cloud:").map(str::trim) else {
+        return Ok(None);
+    };
+    if provider_id.is_empty() {
+        return Ok(None);
+    }
+    let entry = config
+        .cloud_providers
+        .iter()
+        .find(|entry| entry.id == provider_id && entry.enabled)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("The selected cloud media route is missing or disabled."))?;
+    let image_ready =
+        entry.capabilities.image_generation && !entry.image_generation_model_name.trim().is_empty();
+    let video_ready =
+        entry.capabilities.video_generation && !entry.video_generation_model_name.trim().is_empty();
+    let audio_ready =
+        entry.capabilities.audio_generation && !entry.audio_generation_model_name.trim().is_empty();
+    if !image_ready && !video_ready && !audio_ready {
+        bail!("The selected cloud media route does not have a usable image, video, or audio generation model configured.");
+    }
+    let api_key = secrets::read_api_key(&state.paths.secrets_path, provider_id)?
+        .ok_or_else(|| anyhow::anyhow!("The selected cloud media route does not have a saved API key."))?;
+    Ok(Some(MediaGenerationCloudTarget { entry, api_key }))
+}
+
+fn is_speech_generation_model(model: &ModelInfo) -> bool {
+    model.supports_voice_output
+        && matches!(model.backend, ModelBackend::AudioRuntime | ModelBackend::Cloud)
 }
 
 async fn index_page() -> Html<&'static str> {
@@ -734,6 +1183,7 @@ async fn delete_outputs(
 struct ResolvedGenerateContext {
     request: GenerateRequest,
     model: ModelInfo,
+    media_generation_cloud_target: Option<MediaGenerationCloudTarget>,
     selected_loras: Vec<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
     vision_interpreter_model: Option<ModelInfo>,
@@ -759,11 +1209,36 @@ struct PreparedPromptState {
     prompt_assist_sidecar: Option<PromptAssistTraceSidecar>,
 }
 
+#[derive(Clone)]
+struct PromptAssistCloudTarget {
+    entry: CloudProviderEntry,
+    api_key: String,
+}
+
+#[derive(Clone)]
+struct VisionAssistCloudTarget {
+    entry: CloudProviderEntry,
+    api_key: String,
+}
+
+#[derive(Clone)]
+struct MediaGenerationCloudTarget {
+    entry: CloudProviderEntry,
+    api_key: String,
+}
+
 async fn prepare_generate(
     State(state): State<AppState>,
     Json(request): Json<GenerateRequest>,
 ) -> ApiResult<PrepareResponse> {
-    let context = resolve_generate_context(&state, request)?;
+    let context = resolve_generate_context(&state, request).await?;
+    let prompt_assist_cloud = resolve_prompt_assist_cloud_target(&state).await.map_err(internal_error)?;
+    let vision_assist_cloud = resolve_vision_assist_cloud_target(&state).await.map_err(internal_error)?;
+    let reference_image_path = context
+        .reference_asset
+        .as_ref()
+        .filter(|asset| asset.kind == MediaKind::Image)
+        .map(|asset| asset.disk_path(&state.paths.input_dir, &state.paths.outputs_dir));
     let reference_summary = match context.reference_asset.as_ref() {
         Some(asset) => Some(
             build_reference_summary(
@@ -786,6 +1261,9 @@ async fn prepare_generate(
         context.vision_model_was_auto_selected,
         reference_summary.as_ref(),
         context.used_seed,
+        prompt_assist_cloud.as_ref(),
+        vision_assist_cloud.as_ref(),
+        reference_image_path.as_deref(),
     )
     .await
     .map_err(internal_error)?;
@@ -853,7 +1331,7 @@ async fn start_generate(
     State(state): State<AppState>,
     Json(request): Json<GenerateRequest>,
 ) -> ApiResult<GenerateAccepted> {
-    let context = resolve_generate_context(&state, request)?;
+    let context = resolve_generate_context(&state, request).await?;
     let job_id = Uuid::new_v4();
     let job_control = register_job(&state, job_id);
     let batch_total = context.request.normalized_batch_count();
@@ -870,6 +1348,7 @@ async fn start_generate(
             job_id,
             job_control.clone(),
             context.model,
+            context.media_generation_cloud_target,
             context.selected_loras,
             context.prompt_interpreter_model,
             context.vision_interpreter_model,
@@ -915,6 +1394,12 @@ async fn cancel_generate(
     };
 
     control.canceled.store(true, Ordering::SeqCst);
+    let _ = state.events.send(ServerEvent::Progress {
+        job_id: request.job_id,
+        percent: 0.97,
+        phase: "Canceling".to_string(),
+        message: "Cancel requested. Chatty-art is stopping the current run and aborting any queued batch items.".to_string(),
+    });
     Ok(Json(CancelAccepted {
         job_id: request.job_id,
         accepted: true,
@@ -956,7 +1441,7 @@ async fn handle_websocket(mut socket: WebSocket, state: AppState) {
     }
 }
 
-fn resolve_generate_context(
+async fn resolve_generate_context(
     state: &AppState,
     mut request: GenerateRequest,
 ) -> std::result::Result<ResolvedGenerateContext, (StatusCode, String)> {
@@ -970,52 +1455,252 @@ fn resolve_generate_context(
         ));
     }
 
+    let media_generation_cloud_target =
+        resolve_media_generation_cloud_target(state).await.map_err(internal_error)?;
+
     let models = scan_models(
         &state.paths.models_dir,
         &state.paths.diffuse_runtime_dir,
         &state.paths.audio_runtime_dir,
     )
     .map_err(internal_error)?;
-    let model = models
-        .iter()
-        .find(|candidate| candidate.id == request.model || candidate.relative_path == request.model)
-        .cloned()
-        .ok_or_else(|| {
-            (
+    let model = if let Some(target) = media_generation_cloud_target.as_ref() {
+        if !request.normalized_lora_selections().is_empty() {
+            return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Model '{}' was not found in models/.", request.model),
-            )
-        })?;
+                "LoRA stacking is not available on the cloud media-generation lane."
+                    .to_string(),
+            ));
+        }
+        match request.kind {
+            MediaKind::Image => {
+                if !target.entry.capabilities.image_generation
+                    || target.entry.image_generation_model_name.trim().is_empty()
+                {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "The selected cloud media route does not have a still-image generation model configured."
+                            .to_string(),
+                    ));
+                }
+                if request.end_reference_asset.is_some() || request.control_reference_asset.is_some() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Cloud image generation does not support end-frame or control-video references yet."
+                            .to_string(),
+                    ));
+                }
+                ModelInfo {
+                    id: format!("cloud:{}", target.entry.id),
+                    name: format!(
+                        "{} via {}",
+                        target.entry.image_generation_model_name, target.entry.display_name
+                    ),
+                    slug: format!("cloud-{}", target.entry.id),
+                    file_name: String::new(),
+                    relative_path: String::new(),
+                    family: "cloud-image".to_string(),
+                    backend: ModelBackend::Cloud,
+                    generation_style: request.style,
+                    runtime_supported: true,
+                    compatibility_note: "Cloud image generation route.".to_string(),
+                    supported_kinds: vec![MediaKind::Image],
+                    requires_reference: false,
+                    supports_image_reference: false,
+                    supports_reference_strength: false,
+                    requires_end_image_reference: false,
+                    supports_end_image_reference: false,
+                    supports_video_reference: false,
+                    supports_audio_reference: false,
+                    supports_voice_output: false,
+                    mmproj_path: None,
+                }
+            }
+            MediaKind::Audio => {
+                if !target.entry.capabilities.audio_generation
+                    || target.entry.audio_generation_model_name.trim().is_empty()
+                {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "The selected cloud media route does not have a speech-audio generation model configured."
+                            .to_string(),
+                    ));
+                }
+                if request.reference_asset.is_some()
+                    || request.end_reference_asset.is_some()
+                    || request.control_reference_asset.is_some()
+                {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Cloud speech generation does not support guide, end-frame, control-video, or voice-reference assets yet."
+                            .to_string(),
+                    ));
+                }
+                ModelInfo {
+                    id: format!("cloud:{}", target.entry.id),
+                    name: format!(
+                        "{} via {}",
+                        target.entry.audio_generation_model_name, target.entry.display_name
+                    ),
+                    slug: format!("cloud-{}", target.entry.id),
+                    file_name: String::new(),
+                    relative_path: String::new(),
+                    family: "cloud-audio".to_string(),
+                    backend: ModelBackend::Cloud,
+                    generation_style: request.style,
+                    runtime_supported: true,
+                    compatibility_note: "Cloud speech-audio generation route.".to_string(),
+                    supported_kinds: vec![MediaKind::Audio],
+                    requires_reference: false,
+                    supports_image_reference: false,
+                    supports_reference_strength: false,
+                    requires_end_image_reference: false,
+                    supports_end_image_reference: false,
+                    supports_video_reference: false,
+                    supports_audio_reference: false,
+                    supports_voice_output: true,
+                    mmproj_path: None,
+                }
+            }
+            MediaKind::Gif => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Cloud GIF generation is not enabled in Chatty-art yet. The current cloud video lane returns MP4 video only."
+                        .to_string(),
+                ));
+            }
+            MediaKind::Video => {
+                if !target.entry.capabilities.video_generation
+                    || target.entry.video_generation_model_name.trim().is_empty()
+                {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "The selected cloud media route does not have a video generation model configured."
+                            .to_string(),
+                    ));
+                }
+                let (width, height) = request.settings.dimensions_for(request.kind);
+                if !matches!(
+                    (width, height),
+                    (1280, 720)
+                        | (720, 1280)
+                        | (1792, 1024)
+                        | (1024, 1792)
+                        | (1920, 1080)
+                        | (1080, 1920)
+                ) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Cloud video generation currently expects one of these supported sizes: 1280x720, 720x1280, 1792x1024, 1024x1792, 1920x1080, or 1080x1920."
+                            .to_string(),
+                    ));
+                }
+                if request.end_reference_asset.is_some() || request.control_reference_asset.is_some() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Cloud video generation currently supports only the main still-image guide reference. End-frame and control-video references stay local-only."
+                            .to_string(),
+                    ));
+                }
+                if matches!(target.entry.provider_kind, CloudProviderKind::Gemini) {
+                    let requested_seconds = request.settings.video_duration_seconds;
+                    if !matches!(requested_seconds, 4 | 6 | 8) {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "Gemini cloud video requires a duration of 4, 6, or 8 seconds."
+                                .to_string(),
+                        ));
+                    }
+                    if request.reference_asset.is_some() && requested_seconds != 8 {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "Gemini cloud video requires an 8-second duration when using a still-image guide reference."
+                                .to_string(),
+                        ));
+                    }
+                } else if matches!(target.entry.provider_kind, CloudProviderKind::OpenAi) {
+                    validate_openai_video_request(
+                        target.entry.video_generation_model_name.trim(),
+                        &format!("{width}x{height}"),
+                        request.settings.video_duration_seconds,
+                    )
+                    .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+                }
+                ModelInfo {
+                    id: format!("cloud:{}", target.entry.id),
+                    name: format!(
+                        "{} via {}",
+                        target.entry.video_generation_model_name, target.entry.display_name
+                    ),
+                    slug: format!("cloud-{}", target.entry.id),
+                    file_name: String::new(),
+                    relative_path: String::new(),
+                    family: "cloud-video".to_string(),
+                    backend: ModelBackend::Cloud,
+                    generation_style: request.style,
+                    runtime_supported: true,
+                    compatibility_note: if matches!(target.entry.provider_kind, CloudProviderKind::Gemini) {
+                        "Cloud video generation route via Gemini's OpenAI-compatible Veo adapter.".to_string()
+                    } else {
+                        "Cloud video generation route via the current deprecated OpenAI Videos API path.".to_string()
+                    },
+                    supported_kinds: vec![MediaKind::Video],
+                    requires_reference: false,
+                    supports_image_reference: true,
+                    supports_reference_strength: false,
+                    requires_end_image_reference: false,
+                    supports_end_image_reference: false,
+                    supports_video_reference: false,
+                    supports_audio_reference: false,
+                    supports_voice_output: false,
+                    mmproj_path: None,
+                }
+            }
+        }
+    } else {
+        let model = models
+            .iter()
+            .find(|candidate| candidate.id == request.model || candidate.relative_path == request.model)
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Model '{}' was not found in models/.", request.model),
+                )
+            })?;
 
-    if !model.runtime_supported {
-        return Err((StatusCode::BAD_REQUEST, model.compatibility_note.clone()));
-    }
+        if !model.runtime_supported {
+            return Err((StatusCode::BAD_REQUEST, model.compatibility_note.clone()));
+        }
 
-    if model.generation_style != request.style {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "'{}' is a {:?} mode model, but the request asked for {:?} mode.",
-                model.name, model.generation_style, request.style
-            ),
-        ));
-    }
+        if model.generation_style != request.style {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "'{}' is a {:?} mode model, but the request asked for {:?} mode.",
+                    model.name, model.generation_style, request.style
+                ),
+            ));
+        }
 
-    if !model.supported_kinds.contains(&request.kind) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "'{}' currently supports {} generation in Chatty-art.",
-                model.name,
-                model
-                    .supported_kinds
-                    .iter()
-                    .map(|kind| format!("{:?}", kind).to_lowercase())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        ));
-    }
+        if !model.supported_kinds.contains(&request.kind) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "'{}' currently supports {} generation in Chatty-art.",
+                    model.name,
+                    model
+                        .supported_kinds
+                        .iter()
+                        .map(|kind| format!("{:?}", kind).to_lowercase())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+
+        model
+    };
 
     let selected_loras = if !request.normalized_lora_selections().is_empty() {
         let loras = scan_loras(&state.paths.models_dir).map_err(internal_error)?;
@@ -1292,6 +1977,7 @@ fn resolve_generate_context(
     Ok(ResolvedGenerateContext {
         request,
         model,
+        media_generation_cloud_target,
         selected_loras,
         prompt_interpreter_model,
         vision_interpreter_model,
@@ -1419,6 +2105,9 @@ async fn build_prompt_handoff(
     vision_model_was_auto_selected: bool,
     reference_summary: Option<&ReferenceSummary>,
     used_seed: u32,
+    prompt_assist_cloud: Option<&PromptAssistCloudTarget>,
+    vision_assist_cloud: Option<&VisionAssistCloudTarget>,
+    reference_image_path: Option<&Path>,
 ) -> Result<PreparedPromptState> {
     let mut effective_request = request.clone();
     let manual_focus_tags = normalize_manual_prompt_items(&request.manual_focus_tags, 10);
@@ -1426,9 +2115,7 @@ async fn build_prompt_handoff(
     let manual_preserve_items = normalize_manual_prompt_items(&request.manual_preserve_items, 8);
     let manual_change_targets = normalize_manual_prompt_items(&request.manual_change_targets, 8);
     let manual_avoid_items = normalize_manual_prompt_items(&request.manual_avoid_items, 8);
-    let is_speech_audio = request.kind == MediaKind::Audio
-        && model.backend == ModelBackend::AudioRuntime
-        && model.supports_voice_output;
+    let is_speech_audio = request.kind == MediaKind::Audio && is_speech_generation_model(model);
     let is_sound_audio = request.kind == MediaKind::Audio
         && model.backend == ModelBackend::AudioRuntime
         && !model.supports_voice_output;
@@ -1595,31 +2282,66 @@ async fn build_prompt_handoff(
         });
     }
 
-    let interpreter_model = prompt_interpreter_model.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Prompt Assist needs at least one local expressive llama.cpp model in models/."
+    let (mut compiled, interpreter_label) = if let Some(cloud_target) = prompt_assist_cloud {
+        (
+            compile_prompt_cloud(
+                &cloud_target.entry,
+                &cloud_target.api_key,
+                &paths.runtime_dir,
+                &paths.models_dir,
+                vision_interpreter_model,
+                vision_assist_cloud.map(|target| &target.entry),
+                vision_assist_cloud.map(|target| target.api_key.as_str()),
+                vision_model_was_auto_selected,
+                &request.prompt,
+                request.negative_prompt.as_deref(),
+                &manual_preserve_items,
+                &manual_change_targets,
+                &manual_avoid_items,
+                request.style,
+                request.kind,
+                request.prompt_assist,
+                reference_summary,
+                reference_image_path,
+                model.supports_voice_output,
+                used_seed,
+            )
+            .await?,
+            format!(
+                "{} (cloud:{})",
+                cloud_target.entry.prompt_assist_model_name,
+                cloud_target.entry.display_name
+            ),
         )
-    })?;
-
-    let mut compiled = compile_prompt(
-        &paths.runtime_dir,
-        &paths.models_dir,
-        interpreter_model,
-        vision_interpreter_model,
-        vision_model_was_auto_selected,
-        &request.prompt,
-        request.negative_prompt.as_deref(),
-        &manual_preserve_items,
-        &manual_change_targets,
-        &manual_avoid_items,
-        request.style,
-        request.kind,
-        request.prompt_assist,
-        reference_summary,
-        model.supports_voice_output,
-        used_seed,
-    )
-    .await?;
+    } else {
+        let interpreter_model = prompt_interpreter_model.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Prompt Assist needs at least one local expressive llama.cpp model in models/."
+            )
+        })?;
+        (
+            compile_prompt(
+                &paths.runtime_dir,
+                &paths.models_dir,
+                interpreter_model,
+                vision_interpreter_model,
+                vision_model_was_auto_selected,
+                &request.prompt,
+                request.negative_prompt.as_deref(),
+                &manual_preserve_items,
+                &manual_change_targets,
+                &manual_avoid_items,
+                request.style,
+                request.kind,
+                request.prompt_assist,
+                reference_summary,
+                model.supports_voice_output,
+                used_seed,
+            )
+            .await?,
+            interpreter_model.name.clone(),
+        )
+    };
 
     merge_manual_prompt_items(&mut compiled.brief.assumptions, &manual_assumptions, 6);
     merge_manual_prompt_items(&mut compiled.brief.focus_tags, &manual_focus_tags, 10);
@@ -1674,7 +2396,7 @@ async fn build_prompt_handoff(
         ),
         compiled_prompt: (!compiled_prompt.trim().is_empty()).then_some(compiled_prompt.clone()),
         prepared_spoken_text: spoken_text.clone(),
-        interpreter_model_name: Some(interpreter_model.name.clone()),
+        interpreter_model_name: Some(interpreter_label.clone()),
         vision_model_name: compiled.vision_model_name.clone(),
         vision_summary: compiled.vision_summary.clone(),
         vision_error: compiled.vision_error.clone(),
@@ -1687,7 +2409,24 @@ async fn build_prompt_handoff(
             style: request.style,
             assist_mode: request.prompt_assist,
             generation_model: model.name.clone(),
-            interpreter_model: interpreter_model.name.clone(),
+            prompt_assist_route: Some(if interpreter_label.contains("(cloud:") {
+                "cloud".to_string()
+            } else {
+                "local".to_string()
+            }),
+            vision_assist_route: compiled.vision_model_name.as_deref().map(|value| {
+                if value.contains("(cloud:") {
+                    "cloud".to_string()
+                } else {
+                    "local".to_string()
+                }
+            }),
+            output_route: if model.backend == ModelBackend::Cloud {
+                "cloud".to_string()
+            } else {
+                "local".to_string()
+            },
+            interpreter_model: interpreter_label,
             original_prompt: request.prompt.clone(),
             compiled_prompt,
             spoken_text,
@@ -1767,6 +2506,7 @@ fn estimate_generation_time(
             }
         }
         ModelBackend::AudioRuntime => 1.3,
+        ModelBackend::Cloud => 1.0,
     };
 
     let model_size_scale = match model.backend {
@@ -1774,7 +2514,7 @@ fn estimate_generation_time(
             let hinted = parameter_hint(&model.name) as f32;
             (hinted / 80.0).clamp(0.8, 4.0)
         }
-        ModelBackend::StableDiffusionCpp | ModelBackend::AudioRuntime => 1.0,
+        ModelBackend::StableDiffusionCpp | ModelBackend::AudioRuntime | ModelBackend::Cloud => 1.0,
     };
 
     let base_seconds = match (model.backend, request.kind) {
@@ -1818,6 +2558,19 @@ fn estimate_generation_time(
             }
         }
         (ModelBackend::AudioRuntime, MediaKind::Image | MediaKind::Gif | MediaKind::Video) => 1.0,
+        (ModelBackend::Cloud, MediaKind::Image) => 28.0,
+        (ModelBackend::Cloud, MediaKind::Audio) => 10.0 + prompt_word_count * 0.18,
+        (ModelBackend::Cloud, MediaKind::Gif) => 1.0,
+        (ModelBackend::Cloud, MediaKind::Video) => {
+            let duration_scale = (settings.video_duration_seconds.max(2) as f32 / 8.0).clamp(0.6, 2.5);
+            let size_scale = match settings.video_resolution.label() {
+                "1280x720" | "720x1280" => 1.0,
+                "1792x1024" | "1024x1792" => 1.35,
+                "1920x1080" | "1080x1920" => 1.7,
+                _ => 1.2,
+            };
+            95.0 * duration_scale * size_scale
+        }
     } * vram_pressure_scale
         * low_vram_scale;
 
@@ -1830,6 +2583,8 @@ fn estimate_generation_time(
         (ModelBackend::StableDiffusionCpp, MediaKind::Audio) => 0.20,
         (ModelBackend::AudioRuntime, MediaKind::Audio) => 0.45,
         (ModelBackend::AudioRuntime, _) => 0.20,
+        (ModelBackend::Cloud, MediaKind::Image) => 0.55,
+        (ModelBackend::Cloud, _) => 0.25,
     };
 
     let min_seconds = base_seconds.max(3.0).round() as u32;
@@ -1852,20 +2607,51 @@ fn estimate_generation_time(
             }
         }
         (ModelBackend::AudioRuntime, _) => EstimateConfidence::Low,
+        (ModelBackend::Cloud, _) => EstimateConfidence::Low,
     };
     let note = match request.kind {
-        MediaKind::Gif | MediaKind::Video => format!(
-            "{} frames at {} with {}. Video estimates vary most on local hardware.",
-            settings.video_frame_count(),
-            settings.video_resolution.label(),
-            model.name
-        ),
-        MediaKind::Image => format!(
-            "{} at {} steps on {}.",
-            settings.resolution.label(),
-            settings.steps,
-            model.name
-        ),
+        MediaKind::Gif | MediaKind::Video => {
+            if model.backend == ModelBackend::Cloud {
+                if model.compatibility_note.contains("Gemini") {
+                    format!(
+                        "{} at {} via {}. Cloud video timings vary heavily by provider queue depth and policy checks on the Gemini Veo route.",
+                        settings.video_duration_seconds,
+                        settings.video_resolution.label(),
+                        model.name
+                    )
+                } else {
+                    format!(
+                        "{} at {} via {}. Cloud video timings vary heavily by provider queue depth, policy checks, and the deprecated OpenAI Videos API path.",
+                        settings.video_duration_seconds,
+                        settings.video_resolution.label(),
+                        model.name
+                    )
+                }
+            } else {
+                format!(
+                    "{} frames at {} with {}. Video estimates vary most on local hardware.",
+                    settings.video_frame_count(),
+                    settings.video_resolution.label(),
+                    model.name
+                )
+            }
+        }
+        MediaKind::Image => {
+            if model.backend == ModelBackend::Cloud {
+                format!(
+                    "{} routed to {}. Cloud image timings vary by provider load and policy checks.",
+                    settings.resolution.label(),
+                    model.name
+                )
+            } else {
+                format!(
+                    "{} at {} steps on {}.",
+                    settings.resolution.label(),
+                    settings.steps,
+                    model.name
+                )
+            }
+        }
         MediaKind::Audio => {
             if model.backend == ModelBackend::AudioRuntime && model.supports_voice_output {
                 format!(
@@ -1880,6 +2666,11 @@ fn estimate_generation_time(
                     settings.steps,
                     model.name,
                     audio_sequence_units
+                )
+            } else if model.backend == ModelBackend::Cloud {
+                format!(
+                    "Cloud speech estimate is based mainly on spoken text length for {}. Provider load and moderation checks can move this around.",
+                    model.name
                 )
             } else {
                 format!(
@@ -1903,6 +2694,7 @@ async fn run_generation_job(
     job_id: Uuid,
     job_control: Arc<JobControl>,
     model: ModelInfo,
+    media_generation_cloud_target: Option<MediaGenerationCloudTarget>,
     selected_loras: Vec<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
     vision_interpreter_model: Option<ModelInfo>,
@@ -1917,7 +2709,11 @@ async fn run_generation_job(
         job_id,
         0.03,
         "Queued",
-        "Waiting for the local generator slot.",
+        if media_generation_cloud_target.is_some() {
+            "Waiting for the cloud generation slot."
+        } else {
+            "Waiting for the local generator slot."
+        },
     );
 
     let _permit = state
@@ -1933,7 +2729,11 @@ async fn run_generation_job(
         job_id,
         0.12,
         "Preparing",
-        "Checking folders, reference media, and selected model.",
+        if media_generation_cloud_target.is_some() {
+            "Checking folders, reference media, and the selected cloud output lane."
+        } else {
+            "Checking folders, reference media, and selected model."
+        },
     );
 
     let used_seed =
@@ -1953,15 +2753,18 @@ async fn run_generation_job(
     let mut prompt_assist_note = String::new();
     let mut compiled_prompt: Option<String> = None;
     let mut interpreter_model_name: Option<String> = None;
+    let mut vision_model_name: Option<String> = None;
     let mut prompt_assist_sidecar: Option<PromptAssistTraceSidecar> = None;
+    let reference_image_path = reference_asset
+        .as_ref()
+        .filter(|asset| asset.kind == MediaKind::Image)
+        .map(|asset| asset.disk_path(&state.paths.input_dir, &state.paths.outputs_dir));
 
     if request.prompt_assist != PromptAssistMode::Off
         || request.prepared_prompt.is_some()
         || request.prepared_spoken_text.is_some()
         || request.has_audio_literal_content()
-        || (request.kind == MediaKind::Audio
-            && model.backend == ModelBackend::AudioRuntime
-            && model.supports_voice_output)
+        || (request.kind == MediaKind::Audio && is_speech_generation_model(&model))
     {
         if request.prepared_prompt.is_some() {
             emit_progress(
@@ -2008,6 +2811,9 @@ async fn run_generation_job(
                 && vision_interpreter_model.is_some(),
             reference_summary.as_ref(),
             used_seed,
+            resolve_prompt_assist_cloud_target(&state).await?.as_ref(),
+            resolve_vision_assist_cloud_target(&state).await?.as_ref(),
+            reference_image_path.as_deref(),
         )
         .await;
         if let Some(stop) = heartbeat {
@@ -2018,6 +2824,7 @@ async fn run_generation_job(
         prompt_assist_note = prepared.prompt_assist_note;
         effective_request = prepared.effective_request;
         interpreter_model_name = prepared.interpreter_model_name;
+        vision_model_name = prepared.vision_model_name;
         compiled_prompt = prepared.compiled_prompt;
         prompt_assist_sidecar = prepared.prompt_assist_sidecar.map(|mut trace| {
             trace.job_id = job_id;
@@ -2296,6 +3103,201 @@ async fn run_generation_job(
                 None,
             )
         }
+        ModelBackend::Cloud => {
+            let cloud_target = media_generation_cloud_target
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Missing cloud media target for cloud generation job."))?;
+            emit_progress(
+                &state,
+                job_id,
+                0.38,
+                "Dispatching",
+                match request.kind {
+                    MediaKind::Audio => {
+                        "Sending the spoken text and delivery notes to the selected cloud speech provider."
+                    }
+                    MediaKind::Video => {
+                        "Submitting the prepared video prompt to the selected cloud video provider and waiting for the render job to finish."
+                    }
+                    MediaKind::Image | MediaKind::Gif => {
+                        "Sending the prepared image prompt to the selected cloud image provider."
+                    }
+                },
+            );
+
+            let (file_name, relative_path, output_path) =
+                build_output_path(&kind_dir, request.kind, &model.name, used_seed);
+            match request.kind {
+                MediaKind::Image => {
+                    let (width, height) = effective_request.settings.dimensions_for(request.kind);
+                    let size = format!("{width}x{height}");
+                    let result = await_cancelable(
+                        &job_control,
+                        generate_cloud_image(
+                            &cloud_target.entry,
+                            &cloud_target.api_key,
+                            &effective_request.prompt,
+                            &size,
+                        ),
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "Cloud image generation via {} failed: {}",
+                            cloud_target.entry.display_name,
+                            error
+                        )
+                    })?;
+                    ensure_not_canceled(&job_control)?;
+
+                    emit_progress(
+                        &state,
+                        job_id,
+                        0.78,
+                        "Saving",
+                        "Writing the returned cloud image into outputs/ and preparing the preview.",
+                    );
+                    tokio::fs::write(&output_path, &result.bytes).await?;
+                    let note = if let Some(revised_prompt) = result
+                        .revised_prompt
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        format!(
+                            "Cloud image generation ran through {}. Provider revised prompt: {}",
+                            cloud_target.entry.display_name, revised_prompt
+                        )
+                    } else {
+                        format!(
+                            "Cloud image generation ran through {}.",
+                            cloud_target.entry.display_name
+                        )
+                    };
+                    (
+                        file_name,
+                        relative_path,
+                        output_path,
+                        result.mime,
+                        note,
+                        None,
+                    )
+                }
+                MediaKind::Audio => {
+                    let spoken_text_owned = effective_request
+                        .prepared_spoken_text
+                        .clone()
+                        .or_else(|| request.combined_audio_literal_prompt())
+                        .ok_or_else(|| anyhow::anyhow!("Cloud speech generation needs spoken text to voice."))?;
+                    let spoken_text = spoken_text_owned.trim();
+                    if spoken_text.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "Cloud speech generation needs spoken text to voice."
+                        ));
+                    }
+                    let instructions = (!effective_request.prompt.trim().is_empty())
+                        .then_some(effective_request.prompt.as_str());
+                    let result = await_cancelable(
+                        &job_control,
+                        generate_cloud_speech(
+                            &cloud_target.entry,
+                            &cloud_target.api_key,
+                            spoken_text,
+                            instructions,
+                        ),
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "Cloud speech generation via {} failed: {}",
+                            cloud_target.entry.display_name,
+                            error
+                        )
+                    })?;
+                    ensure_not_canceled(&job_control)?;
+
+                    emit_progress(
+                        &state,
+                        job_id,
+                        0.78,
+                        "Saving",
+                        "Writing the returned cloud speech audio into outputs/ and preparing playback.",
+                    );
+                    tokio::fs::write(&output_path, &result.bytes).await?;
+                    (
+                        file_name,
+                        relative_path,
+                        output_path,
+                        result.mime,
+                        format!(
+                            "Cloud speech generation ran through {} using the '{}' voice.",
+                            cloud_target.entry.display_name, result.voice
+                        ),
+                        None,
+                    )
+                }
+                MediaKind::Gif => {
+                    return Err(anyhow::anyhow!(
+                        "Cloud GIF generation is not enabled in Chatty-art yet."
+                    ));
+                }
+                MediaKind::Video => {
+                    let (width, height) = effective_request.settings.dimensions_for(request.kind);
+                    let size = format!("{width}x{height}");
+                    let reference_image_path = reference_asset
+                        .as_ref()
+                        .filter(|asset| asset.kind == MediaKind::Image)
+                        .map(|asset| asset.disk_path(&state.paths.input_dir, &state.paths.outputs_dir));
+                    let result = await_cancelable(
+                        &job_control,
+                        generate_cloud_video(
+                            &cloud_target.entry,
+                            &cloud_target.api_key,
+                            &effective_request.prompt,
+                            &size,
+                            effective_request.settings.video_duration_seconds,
+                            reference_image_path.as_deref(),
+                        ),
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "Cloud video generation via {} failed: {}",
+                            cloud_target.entry.display_name,
+                            error
+                        )
+                    })?;
+                    ensure_not_canceled(&job_control)?;
+
+                    emit_progress(
+                        &state,
+                        job_id,
+                        0.82,
+                        "Saving",
+                        "Writing the returned cloud MP4 into outputs/ and preparing playback.",
+                    );
+                    tokio::fs::write(&output_path, &result.bytes).await?;
+                    (
+                        file_name,
+                        relative_path,
+                        output_path,
+                        result.mime,
+                        if matches!(cloud_target.entry.provider_kind, CloudProviderKind::Gemini) {
+                            format!(
+                                "Cloud video generation ran through {} using Gemini model {} at {} for {} second(s).",
+                                cloud_target.entry.display_name, result.model, result.size, result.seconds
+                            )
+                        } else {
+                            format!(
+                                "Cloud video generation ran through {} using {} at {} for {} second(s). This OpenAI Videos API path is deprecated and must be replaced before September 24, 2026.",
+                                cloud_target.entry.display_name, result.model, result.size, result.seconds
+                            )
+                        },
+                        None,
+                    )
+                }
+            }
+        }
     };
 
     emit_progress(
@@ -2318,9 +3320,41 @@ async fn run_generation_job(
                 "Generated locally with the stable-diffusion.cpp realism backend."
             }
             ModelBackend::AudioRuntime => "Generated locally with the realism audio backend.",
+            ModelBackend::Cloud => {
+                if request.kind == MediaKind::Audio {
+                    "Generated through the explicitly selected cloud speech provider."
+                } else {
+                    "Generated through the explicitly selected cloud media route."
+                }
+            }
         },
     );
     let created_at = Utc::now();
+    let prompt_assist_route = if request.prompt_assist == PromptAssistMode::Off {
+        None
+    } else if interpreter_model_name
+        .as_deref()
+        .is_some_and(|value| value.contains("(cloud:"))
+    {
+        Some("cloud".to_string())
+    } else {
+        Some("local".to_string())
+    };
+    let vision_assist_route = if vision_model_name.is_none() {
+        None
+    } else if vision_model_name
+        .as_deref()
+        .is_some_and(|value| value.contains("(cloud:"))
+    {
+        Some("cloud".to_string())
+    } else {
+        Some("local".to_string())
+    };
+    let output_route = if media_generation_cloud_target.is_some() {
+        Some("cloud".to_string())
+    } else {
+        Some("local".to_string())
+    };
     let output = OutputEntry {
         id: file_name
             .trim_end_matches(&format!(
@@ -2342,6 +3376,10 @@ async fn run_generation_job(
         spoken_text: effective_request.prepared_spoken_text.clone(),
         prompt_assist: request.prompt_assist,
         interpreter_model: interpreter_model_name,
+        prompt_assist_route: prompt_assist_route.clone(),
+        vision_model: vision_model_name,
+        vision_assist_route: vision_assist_route.clone(),
+        output_route: output_route.clone(),
         lora_name: selected_loras.first().map(|lora| lora.name.clone()),
         lora_weight: effective_request
             .normalized_lora_selections()
@@ -2389,6 +3427,9 @@ async fn run_generation_job(
             style: request.style,
             backend: model.backend,
             model: model.name.clone(),
+            prompt_assist_route: prompt_assist_route.clone(),
+            vision_assist_route: vision_assist_route.clone(),
+            output_route: output_route.clone().unwrap_or_else(|| "local".to_string()),
             prompt: request.prompt.clone(),
             note: generation_note.clone(),
             used_fallback: trace.used_fallback,
@@ -2435,6 +3476,7 @@ async fn run_generation_batch(
     job_id: Uuid,
     job_control: Arc<JobControl>,
     model: ModelInfo,
+    media_generation_cloud_target: Option<MediaGenerationCloudTarget>,
     selected_loras: Vec<LoraInfo>,
     prompt_interpreter_model: Option<ModelInfo>,
     vision_interpreter_model: Option<ModelInfo>,
@@ -2476,6 +3518,7 @@ async fn run_generation_batch(
             job_id,
             job_control.clone(),
             model.clone(),
+            media_generation_cloud_target.clone(),
             selected_loras.clone(),
             prompt_interpreter_model.clone(),
             vision_interpreter_model.clone(),
@@ -2545,6 +3588,31 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, String) {
         StatusCode::INTERNAL_SERVER_ERROR,
         "Something went wrong while handling that request.".to_string(),
     )
+}
+
+fn summarize_provider(paths: &AppPaths, entry: &CloudProviderEntry) -> Result<CloudProviderSummary> {
+    Ok(CloudProviderSummary {
+        id: entry.id.clone(),
+        display_name: entry.display_name.clone(),
+        provider_kind: entry.provider_kind,
+        base_url: entry.base_url.clone(),
+        prompt_assist_model_name: entry.prompt_assist_model_name.clone(),
+        vision_model_name: entry.vision_model_name.clone(),
+        image_generation_model_name: entry.image_generation_model_name.clone(),
+        video_generation_model_name: entry.video_generation_model_name.clone(),
+        audio_generation_model_name: entry.audio_generation_model_name.clone(),
+        audio_generation_voice: entry.audio_generation_voice.clone(),
+        enabled: entry.enabled,
+        capabilities: entry.capabilities.clone(),
+        prompt_assist_verification: entry.prompt_assist_verification.clone(),
+        vision_assist_verification: entry.vision_assist_verification.clone(),
+        media_generation_verification: entry.media_generation_verification.clone(),
+        has_api_key: secrets::has_api_key(&paths.secrets_path, &entry.id)?,
+    })
+}
+
+fn now_unix_ms() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
 }
 
 fn build_output_path(
@@ -3254,6 +4322,10 @@ fn scan_outputs(outputs_dir: &Path) -> Result<Vec<OutputEntry>> {
             spoken_text: None,
             prompt_assist: PromptAssistMode::Off,
             interpreter_model: None,
+            prompt_assist_route: None,
+            vision_model: None,
+            vision_assist_route: None,
+            output_route: None,
             lora_name: None,
             lora_weight: None,
             lora_labels: Vec::new(),
@@ -3413,30 +4485,37 @@ fn choose_prompt_interpreter_model(
     models: &[ModelInfo],
     selected_model: &ModelInfo,
 ) -> Option<ModelInfo> {
-    let mut candidates = models
+    let mut preferred_candidates = models
         .iter()
-        .filter(|model| supports_prompt_interpreter(model))
+        .filter(|model| supports_auto_prompt_interpreter(model))
         .cloned()
         .collect::<Vec<_>>();
-    if candidates.is_empty() {
+    if preferred_candidates.is_empty() {
+        preferred_candidates = models
+            .iter()
+            .filter(|model| supports_prompt_interpreter(model))
+            .cloned()
+            .collect::<Vec<_>>();
+    }
+    if preferred_candidates.is_empty() {
         return None;
     }
 
-    candidates.sort_by(|left, right| {
+    preferred_candidates.sort_by(|left, right| {
         prompt_interpreter_sort_key(left)
             .cmp(&prompt_interpreter_sort_key(right))
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
 
-    if supports_prompt_interpreter(selected_model) {
+    if supports_auto_prompt_interpreter(selected_model) {
         let selected_size = parameter_hint(&selected_model.name);
-        let smallest_size = parameter_hint(&candidates[0].name);
+        let smallest_size = parameter_hint(&preferred_candidates[0].name);
         if selected_size <= smallest_size.saturating_add(2) {
             return Some(selected_model.clone());
         }
     }
 
-    candidates.into_iter().next()
+    preferred_candidates.into_iter().next()
 }
 
 fn choose_vision_interpreter_model(
@@ -3484,6 +4563,10 @@ fn supports_prompt_interpreter(model: &ModelInfo) -> bool {
 
 fn supports_manual_prompt_interpreter(model: &ModelInfo) -> bool {
     supports_prompt_interpreter(model)
+}
+
+fn supports_auto_prompt_interpreter(model: &ModelInfo) -> bool {
+    supports_prompt_interpreter(model) && !supports_vision_interpreter(model)
 }
 
 fn supports_vision_interpreter(model: &ModelInfo) -> bool {
@@ -3905,6 +4988,14 @@ mod tests {
         }
     }
 
+    fn fake_model_with_multimodal_support(name: &str, family: &str) -> ModelInfo {
+        ModelInfo {
+            supports_image_reference: true,
+            mmproj_path: Some(format!("{name}-mmproj.gguf")),
+            ..fake_model(name, family)
+        }
+    }
+
     fn fake_audio_model(name: &str, supports_voice_output: bool) -> ModelInfo {
         ModelInfo {
             id: name.to_string(),
@@ -3984,6 +5075,9 @@ mod tests {
             input_dir: PathBuf::from("."),
             outputs_dir: PathBuf::from("."),
             runtime_dir: PathBuf::from("."),
+            config_dir: PathBuf::from("."),
+            config_path: PathBuf::from("."),
+            secrets_path: PathBuf::from("."),
             diffuse_runtime_dir: PathBuf::from("."),
             audio_runtime_dir: PathBuf::from("."),
         }
@@ -4041,6 +5135,23 @@ mod tests {
         let models = vec![selected.clone(), fast.clone()];
         let chosen = choose_prompt_interpreter_model(&models, &selected).unwrap();
         assert_eq!(chosen.name, fast.name);
+    }
+
+    #[test]
+    fn prompt_interpreter_auto_prefers_text_only_helper_over_multimodal() {
+        let selected = fake_model_with_multimodal_support("Qwen2.5-VL-7B-Instruct-Q4_K_M", "Vision");
+        let text_only = fake_model("Qwen3-8B-abliterated-q8_0", "Text");
+        let models = vec![selected.clone(), text_only.clone()];
+        let chosen = choose_prompt_interpreter_model(&models, &selected).unwrap();
+        assert_eq!(chosen.name, text_only.name);
+    }
+
+    #[test]
+    fn prompt_interpreter_auto_falls_back_to_multimodal_when_text_only_missing() {
+        let selected = fake_model_with_multimodal_support("Qwen2.5-VL-7B-Instruct-Q4_K_M", "Vision");
+        let models = vec![selected.clone()];
+        let chosen = choose_prompt_interpreter_model(&models, &selected).unwrap();
+        assert_eq!(chosen.name, selected.name);
     }
 
     #[test]
@@ -4242,6 +5353,9 @@ mod tests {
             false,
             None,
             1234,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -4303,6 +5417,9 @@ mod tests {
             false,
             None,
             1234,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -4360,6 +5477,9 @@ mod tests {
             false,
             None,
             1234,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();

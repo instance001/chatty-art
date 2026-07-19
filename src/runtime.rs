@@ -15,13 +15,15 @@ use serde_json::{Value, json};
 use tokio::{fs, process::Command, time::timeout};
 
 use crate::{
+    cloud_ai::{generate_prompt_assist_json, generate_vision_assist_json},
     render::{
         AudioLayerPlan, AudioPlan, ImagePlan, MotionShapePlan, SceneRole, ShapeKind, ShapePlan,
         VideoPlan, Waveform,
     },
     types::{
-        AssetSource, GenerationSettings, GenerationStyle, InputAsset, MediaKind, ModelInfo,
-        PromptAssistMode, ReferenceIntent, ReferenceSummary, VideoResolutionPreset,
+        AssetSource, CloudProviderEntry, GenerationSettings, GenerationStyle, InputAsset,
+        MediaKind, ModelInfo, PromptAssistMode, ReferenceIntent, ReferenceSummary,
+        VideoResolutionPreset,
     },
 };
 
@@ -410,6 +412,188 @@ pub async fn compile_prompt(
     }
 }
 
+pub async fn compile_prompt_cloud(
+    prompt_cloud_entry: &CloudProviderEntry,
+    prompt_api_key: &str,
+    runtime_dir: &Path,
+    model_dir: &Path,
+    vision_model: Option<&ModelInfo>,
+    vision_cloud_entry: Option<&CloudProviderEntry>,
+    vision_api_key: Option<&str>,
+    vision_model_was_auto_selected: bool,
+    user_prompt: &str,
+    user_negative_prompt: Option<&str>,
+    manual_preserve_items: &[String],
+    manual_change_targets: &[String],
+    manual_avoid_items: &[String],
+    style: GenerationStyle,
+    kind: MediaKind,
+    mode: PromptAssistMode,
+    reference: Option<&ReferenceSummary>,
+    reference_image_path: Option<&Path>,
+    supports_voice_output: bool,
+    seed: u32,
+) -> Result<CompiledPrompt> {
+    let vision_state = if reference.is_some_and(|summary| summary.kind == MediaKind::Image) {
+        if let (Some(vision_cloud_entry), Some(vision_api_key), Some(reference_image_path)) =
+            (vision_cloud_entry, vision_api_key, reference_image_path)
+        {
+            match analyze_reference_image_cloud(
+                vision_cloud_entry,
+                vision_api_key,
+                user_prompt,
+                user_negative_prompt,
+                reference,
+                reference_image_path,
+            )
+            .await
+            {
+                Ok(brief) => Some(VisionAssistState {
+                    model_name: format!(
+                        "{} (cloud:{})",
+                        vision_cloud_entry.vision_model_name, vision_cloud_entry.display_name
+                    ),
+                    brief: Some(brief),
+                    error: None,
+                }),
+                Err(error) => Some(VisionAssistState {
+                    model_name: format!(
+                        "{} (cloud:{})",
+                        vision_cloud_entry.vision_model_name, vision_cloud_entry.display_name
+                    ),
+                    brief: None,
+                    error: Some(error.to_string()),
+                }),
+            }
+        } else {
+            match vision_model {
+                Some(vision_model) => {
+                    match analyze_reference_image(
+                        runtime_dir,
+                        model_dir,
+                        vision_model,
+                        user_prompt,
+                        user_negative_prompt,
+                        reference,
+                        seed,
+                    )
+                    .await
+                    {
+                        Ok(brief) => Some(VisionAssistState {
+                            model_name: vision_model.name.clone(),
+                            brief: Some(brief),
+                            error: None,
+                        }),
+                        Err(error) => Some(VisionAssistState {
+                            model_name: vision_model.name.clone(),
+                            brief: None,
+                            error: Some(error.to_string()),
+                        }),
+                    }
+                }
+                None => None,
+            }
+        }
+    } else {
+        None
+    };
+    let mut effective_vision_brief = vision_state
+        .as_ref()
+        .and_then(|state| state.brief.clone());
+    apply_manual_vision_overrides(
+        &mut effective_vision_brief,
+        manual_preserve_items,
+        manual_change_targets,
+        manual_avoid_items,
+    );
+    let vision_brief = effective_vision_brief.as_ref();
+    let schema = prompt_assist_schema(kind, supports_voice_output);
+    let prompt = prompt_assist_prompt(
+        user_prompt,
+        user_negative_prompt,
+        style,
+        kind,
+        mode,
+        reference,
+        vision_brief,
+        supports_voice_output,
+    );
+    let max_tokens = match mode {
+        PromptAssistMode::Off => 0,
+        PromptAssistMode::Gentle => 280,
+        PromptAssistMode::Strong => 440,
+    };
+    let raw_output = generate_prompt_assist_json(
+        prompt_cloud_entry,
+        prompt_api_key,
+        &prompt,
+        &schema,
+        max_tokens,
+    )
+    .await?;
+    let extracted_json = extract_json_objects(&raw_output).into_iter().next();
+    let brief = if let Some(json_blob) = extracted_json.as_deref() {
+        serde_json::from_str::<PromptAssistBrief>(json_blob)
+            .map(normalize_prompt_assist_brief)
+            .map_err(|error| anyhow!("Cloud Prompt Assist returned JSON that did not match the expected shape: {error}"))?
+    } else {
+        serde_json::from_str::<PromptAssistBrief>(&raw_output)
+            .map(normalize_prompt_assist_brief)
+            .map_err(|error| anyhow!("Cloud Prompt Assist did not return usable JSON: {error}"))?
+    };
+    let spoken_text = if kind == MediaKind::Audio && supports_voice_output {
+        brief
+            .spoken_text
+            .as_deref()
+            .and_then(optional_text)
+            .map(str::to_string)
+            .or_else(|| Some(derive_spoken_text_heuristic(user_prompt)))
+    } else {
+        None
+    };
+    let compiled_prompt = if kind == MediaKind::Audio && supports_voice_output {
+        optional_text(&brief.expanded_prompt)
+            .map(|value| polish_compiled_prompt(value, &brief.focus_tags, style, kind))
+            .or_else(|| derive_speech_direction_heuristic(user_prompt, spoken_text.as_deref()))
+            .unwrap_or_default()
+    } else if brief.expanded_prompt.trim().is_empty() {
+        user_prompt.trim().to_string()
+    } else {
+        polish_compiled_prompt(&brief.expanded_prompt, &brief.focus_tags, style, kind)
+    };
+    let negative_prompt =
+        merge_negative_prompts(user_negative_prompt, optional_text(&brief.negative_prompt));
+    Ok(CompiledPrompt {
+        prompt: compiled_prompt,
+        negative_prompt,
+        spoken_text,
+        note: format!(
+            "{} Prompt Assist used cloud provider {}.",
+            prompt_assist_note(
+                mode,
+                &brief,
+                kind,
+                supports_voice_output,
+                vision_model,
+                vision_model_was_auto_selected,
+                vision_brief,
+            ),
+            prompt_cloud_entry.display_name
+        ),
+        vision_model_name: vision_state.as_ref().map(|state| state.model_name.clone()),
+        vision_summary: vision_brief.map(|brief| vision_summary(Some(brief))),
+        vision_error: vision_state.as_ref().and_then(|state| state.error.clone()),
+        brief,
+        trace: PlannerTrace {
+            used_fallback: false,
+            raw_output,
+            stderr: String::new(),
+            extracted_json,
+        },
+        used_original_prompt: false,
+    })
+}
+
 fn apply_manual_vision_overrides(
     vision_brief: &mut Option<VisionAssistBrief>,
     manual_preserve_items: &[String],
@@ -452,6 +636,44 @@ fn apply_manual_vision_overrides(
         }
         *brief = normalize_vision_assist_brief(brief.clone());
     }
+}
+
+async fn analyze_reference_image_cloud(
+    cloud_entry: &CloudProviderEntry,
+    api_key: &str,
+    user_prompt: &str,
+    user_negative_prompt: Option<&str>,
+    reference: Option<&ReferenceSummary>,
+    reference_image_path: &Path,
+) -> Result<VisionAssistBrief> {
+    let reference = reference.ok_or_else(|| anyhow!("missing image reference for vision assist"))?;
+    let schema = vision_assist_schema();
+    let prompt = vision_assist_prompt(user_prompt, user_negative_prompt, reference);
+    let raw_output = generate_vision_assist_json(
+        cloud_entry,
+        api_key,
+        &prompt,
+        &schema,
+        reference_image_path,
+    )
+    .await?;
+    let extracted_json = extract_json_objects(&raw_output).into_iter().next();
+    let brief = if let Some(json_blob) = extracted_json.as_deref() {
+        serde_json::from_str::<VisionAssistBrief>(json_blob)
+            .map(normalize_vision_assist_brief)
+            .map_err(|error| {
+                anyhow!(
+                    "Cloud Vision Assist returned JSON that did not match the expected shape: {error}"
+                )
+            })?
+    } else {
+        serde_json::from_str::<VisionAssistBrief>(&raw_output)
+            .map(normalize_vision_assist_brief)
+            .map_err(|error| {
+                anyhow!("Cloud Vision Assist did not return usable JSON: {error}")
+            })?
+    };
+    Ok(brief)
 }
 
 async fn analyze_reference_image(
@@ -785,12 +1007,7 @@ async fn invoke_llama_json<T: DeserializeOwned>(
     let executable = if uses_multimodal_cli {
         runtime_dir.join("llama-mtmd-cli.exe")
     } else {
-        let completion = runtime_dir.join("llama-completion.exe");
-        if completion.exists() {
-            completion
-        } else {
-            runtime_dir.join("llama-cli.exe")
-        }
+        runtime_dir.join("llama-cli.exe")
     };
     if !executable.exists() {
         let _ = fs::remove_file(&prompt_file).await;
@@ -830,7 +1047,6 @@ async fn invoke_llama_json<T: DeserializeOwned>(
     } else {
         command
             .arg("--single-turn")
-            .arg("--no-conversation")
             .arg("--no-display-prompt")
             .arg("--no-jinja")
             .arg("--skip-chat-parsing")

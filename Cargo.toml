@@ -7,6 +7,7 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 anyhow = "1.0.100"
 axum = { version = "0.8.6", features = ["ws", "json"] }
+base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["clock", "serde"] }
 futures-util = "0.3.31"
 gif = "0.13.3"

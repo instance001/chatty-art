@@ -23,6 +23,13 @@ const state = {
   workflowMode: "basic",
   audioSegments: [],
   loraSelections: [],
+  cloudProviders: [],
+  cloudApiKeyLanesEnabled: false,
+  cloudLaneAssignments: {
+    prompt_assist: "local_auto",
+    vision_assist: "local_auto",
+    media_generation: "local_only",
+  },
   preparedHandoff: null,
   handoffTargets: [],
   selectedOutputIds: new Set(),
@@ -123,12 +130,57 @@ const elements = {
   runtimeBadges: document.getElementById("runtimeBadges"),
   modelSelect: document.getElementById("modelSelect"),
   modelSummary: document.getElementById("modelSummary"),
+  mediaGenerationCloudBlock: document.getElementById("mediaGenerationCloudBlock"),
+  mediaGenerationLaneSelect: document.getElementById("mediaGenerationLaneSelect"),
+  mediaGenerationLaneSummary: document.getElementById("mediaGenerationLaneSummary"),
+  mediaGenerationCloudEntrySelect: document.getElementById("mediaGenerationCloudEntrySelect"),
+  mediaGenerationCloudStatus: document.getElementById("mediaGenerationCloudStatus"),
+  mediaGenerationCloudNameInput: document.getElementById("mediaGenerationCloudNameInput"),
+  mediaGenerationCloudProviderInput: document.getElementById("mediaGenerationCloudProviderInput"),
+  mediaGenerationCloudBaseUrlInput: document.getElementById("mediaGenerationCloudBaseUrlInput"),
+  mediaGenerationCloudImageModelInput: document.getElementById("mediaGenerationCloudImageModelInput"),
+  mediaGenerationCloudVideoModelInput: document.getElementById("mediaGenerationCloudVideoModelInput"),
+  mediaGenerationCloudAudioModelInput: document.getElementById("mediaGenerationCloudAudioModelInput"),
+  mediaGenerationCloudVoiceInput: document.getElementById("mediaGenerationCloudVoiceInput"),
+  mediaGenerationCloudApiKeyInput: document.getElementById("mediaGenerationCloudApiKeyInput"),
+  mediaGenerationCloudEnabledInput: document.getElementById("mediaGenerationCloudEnabledInput"),
+  saveMediaGenerationCloudButton: document.getElementById("saveMediaGenerationCloudButton"),
+  verifyMediaGenerationCloudButton: document.getElementById("verifyMediaGenerationCloudButton"),
+  deleteMediaGenerationCloudButton: document.getElementById("deleteMediaGenerationCloudButton"),
   promptModelBlock: document.getElementById("promptModelBlock"),
   promptModelSelect: document.getElementById("promptModelSelect"),
   promptModelSummary: document.getElementById("promptModelSummary"),
+  promptAssistCloudBlock: document.getElementById("promptAssistCloudBlock"),
+  promptAssistLaneSelect: document.getElementById("promptAssistLaneSelect"),
+  promptAssistLaneSummary: document.getElementById("promptAssistLaneSummary"),
+  promptAssistCloudEntrySelect: document.getElementById("promptAssistCloudEntrySelect"),
+  promptAssistCloudStatus: document.getElementById("promptAssistCloudStatus"),
+  promptAssistCloudNameInput: document.getElementById("promptAssistCloudNameInput"),
+  promptAssistCloudProviderInput: document.getElementById("promptAssistCloudProviderInput"),
+  promptAssistCloudBaseUrlInput: document.getElementById("promptAssistCloudBaseUrlInput"),
+  promptAssistCloudModelInput: document.getElementById("promptAssistCloudModelInput"),
+  promptAssistCloudApiKeyInput: document.getElementById("promptAssistCloudApiKeyInput"),
+  promptAssistCloudEnabledInput: document.getElementById("promptAssistCloudEnabledInput"),
+  savePromptAssistCloudButton: document.getElementById("savePromptAssistCloudButton"),
+  verifyPromptAssistCloudButton: document.getElementById("verifyPromptAssistCloudButton"),
+  deletePromptAssistCloudButton: document.getElementById("deletePromptAssistCloudButton"),
   visionModelBlock: document.getElementById("visionModelBlock"),
   visionModelSelect: document.getElementById("visionModelSelect"),
   visionModelSummary: document.getElementById("visionModelSummary"),
+  visionAssistCloudBlock: document.getElementById("visionAssistCloudBlock"),
+  visionAssistLaneSelect: document.getElementById("visionAssistLaneSelect"),
+  visionAssistLaneSummary: document.getElementById("visionAssistLaneSummary"),
+  visionAssistCloudEntrySelect: document.getElementById("visionAssistCloudEntrySelect"),
+  visionAssistCloudStatus: document.getElementById("visionAssistCloudStatus"),
+  visionAssistCloudNameInput: document.getElementById("visionAssistCloudNameInput"),
+  visionAssistCloudProviderInput: document.getElementById("visionAssistCloudProviderInput"),
+  visionAssistCloudBaseUrlInput: document.getElementById("visionAssistCloudBaseUrlInput"),
+  visionAssistCloudModelInput: document.getElementById("visionAssistCloudModelInput"),
+  visionAssistCloudApiKeyInput: document.getElementById("visionAssistCloudApiKeyInput"),
+  visionAssistCloudEnabledInput: document.getElementById("visionAssistCloudEnabledInput"),
+  saveVisionAssistCloudButton: document.getElementById("saveVisionAssistCloudButton"),
+  verifyVisionAssistCloudButton: document.getElementById("verifyVisionAssistCloudButton"),
+  deleteVisionAssistCloudButton: document.getElementById("deleteVisionAssistCloudButton"),
   temperatureCard: document.getElementById("temperatureCard"),
   temperatureInput: document.getElementById("temperatureInput"),
   temperatureValue: document.getElementById("temperatureValue"),
@@ -275,8 +327,28 @@ elements.addLoraButton.addEventListener("click", () => {
   renderAdvancedRealismSettings();
   syncActionState();
 });
-elements.modelSelect.addEventListener("change", () => {
+elements.modelSelect.addEventListener("change", async () => {
   clearPreparedHandoff();
+  const selection = elements.modelSelect.value || "";
+  const currentLane = state.cloudLaneAssignments?.media_generation || "local_only";
+  if (selection.startsWith("cloud-route:")) {
+    const providerRoute = mediaGenerationLaneSelectionFromRouteValue(selection);
+    if (providerRoute && currentLane !== providerRoute) {
+      elements.mediaGenerationLaneSelect.value = providerRoute;
+      await saveMediaGenerationLaneSelection();
+      return;
+    }
+  } else if (selection.startsWith("cloud:")) {
+    if (currentLane !== selection) {
+      elements.mediaGenerationLaneSelect.value = selection;
+      await saveMediaGenerationLaneSelection();
+      return;
+    }
+  } else if (currentLane.startsWith("cloud:")) {
+    elements.mediaGenerationLaneSelect.value = "local_only";
+    await saveMediaGenerationLaneSelection();
+    return;
+  }
   renderStyleMode();
   renderPrepareKindOptions();
   renderModelSummary();
@@ -287,13 +359,105 @@ elements.modelSelect.addEventListener("change", () => {
   renderReferenceIntentControls();
   syncActionState();
 });
-elements.promptModelSelect.addEventListener("change", () => {
+elements.promptModelSelect.addEventListener("change", async () => {
   clearPreparedHandoff();
+  const selection = elements.promptModelSelect.value || "";
+  const currentLane = state.cloudLaneAssignments?.prompt_assist || "local_auto";
+  if (selection.startsWith("cloud:")) {
+    if (currentLane !== selection) {
+      elements.promptAssistLaneSelect.value = selection;
+      await savePromptAssistLaneSelection();
+      return;
+    }
+  } else if (currentLane.startsWith("cloud:")) {
+    elements.promptAssistLaneSelect.value = "local_auto";
+    await savePromptAssistLaneSelection();
+    return;
+  }
   renderPromptModelSelector();
   syncActionState();
 });
-elements.visionModelSelect.addEventListener("change", () => {
+elements.promptAssistLaneSelect.addEventListener("change", () => {
+  savePromptAssistLaneSelection();
+});
+elements.promptAssistCloudEntrySelect.addEventListener("change", () => {
+  populatePromptAssistCloudForm();
+  renderPromptAssistCloudControls();
+});
+elements.promptAssistCloudProviderInput.addEventListener("change", () => {
+  const defaults = cloudProviderDefaults(elements.promptAssistCloudProviderInput.value);
+  elements.promptAssistCloudBaseUrlInput.value = defaults.baseUrl;
+  elements.promptAssistCloudModelInput.value = defaults.model;
+});
+elements.savePromptAssistCloudButton.addEventListener("click", () => {
+  savePromptAssistCloudProvider();
+});
+elements.verifyPromptAssistCloudButton.addEventListener("click", () => {
+  verifyPromptAssistCloudProvider();
+});
+elements.deletePromptAssistCloudButton.addEventListener("click", () => {
+  deletePromptAssistCloudProvider();
+});
+elements.mediaGenerationLaneSelect.addEventListener("change", () => {
+  saveMediaGenerationLaneSelection();
+});
+elements.mediaGenerationCloudEntrySelect.addEventListener("change", () => {
+  populateMediaGenerationCloudForm();
+  renderMediaGenerationCloudControls();
+});
+elements.mediaGenerationCloudProviderInput.addEventListener("change", () => {
+  const defaults = cloudProviderDefaults(elements.mediaGenerationCloudProviderInput.value);
+  elements.mediaGenerationCloudBaseUrlInput.value = defaults.baseUrl;
+  elements.mediaGenerationCloudImageModelInput.value = defaults.imageModel || defaults.model;
+  elements.mediaGenerationCloudVideoModelInput.value = defaults.videoModel || "";
+  elements.mediaGenerationCloudAudioModelInput.value = defaults.audioModel || "";
+  elements.mediaGenerationCloudVoiceInput.value = defaults.audioVoice || "";
+});
+elements.saveMediaGenerationCloudButton.addEventListener("click", () => {
+  saveMediaGenerationCloudProvider();
+});
+elements.verifyMediaGenerationCloudButton.addEventListener("click", () => {
+  verifyMediaGenerationCloudProvider();
+});
+elements.deleteMediaGenerationCloudButton.addEventListener("click", () => {
+  deleteMediaGenerationCloudProvider();
+});
+elements.visionAssistLaneSelect.addEventListener("change", () => {
+  saveVisionAssistLaneSelection();
+});
+elements.visionAssistCloudEntrySelect.addEventListener("change", () => {
+  populateVisionAssistCloudForm();
+  renderVisionAssistCloudControls();
+});
+elements.visionAssistCloudProviderInput.addEventListener("change", () => {
+  const defaults = cloudProviderDefaults(elements.visionAssistCloudProviderInput.value);
+  elements.visionAssistCloudBaseUrlInput.value = defaults.baseUrl;
+  elements.visionAssistCloudModelInput.value = defaults.model;
+});
+elements.saveVisionAssistCloudButton.addEventListener("click", () => {
+  saveVisionAssistCloudProvider();
+});
+elements.verifyVisionAssistCloudButton.addEventListener("click", () => {
+  verifyVisionAssistCloudProvider();
+});
+elements.deleteVisionAssistCloudButton.addEventListener("click", () => {
+  deleteVisionAssistCloudProvider();
+});
+elements.visionModelSelect.addEventListener("change", async () => {
   clearPreparedHandoff();
+  const selection = elements.visionModelSelect.value || "";
+  const currentLane = state.cloudLaneAssignments?.vision_assist || "local_auto";
+  if (selection.startsWith("cloud:")) {
+    if (currentLane !== selection) {
+      elements.visionAssistLaneSelect.value = selection;
+      await saveVisionAssistLaneSelection();
+      return;
+    }
+  } else if (currentLane.startsWith("cloud:")) {
+    elements.visionAssistLaneSelect.value = "local_auto";
+    await saveVisionAssistLaneSelection();
+    return;
+  }
   renderVisionModelSelector();
   syncActionState();
 });
@@ -395,7 +559,13 @@ elements.promptAssistInput.addEventListener("change", () => renderPromptModelSel
 elements.promptAssistInput.addEventListener("change", () => renderVisionModelSelector());
 elements.prepareKindInput.addEventListener("change", () => {
   clearPreparedHandoff();
+  renderModels();
+  normalizeAssignedReferencesForCurrentModel();
+  renderReferenceIntentControls();
+  renderVisionModelSelector();
+  renderTrayPreview();
   refreshBatchCountCopy();
+  syncActionState();
 });
 elements.outputHandoffNote.addEventListener("input", () => renderOutputHandoffPanel());
 elements.sendOutputsToLoraButton.addEventListener("click", () => sendSelectedOutputsToLora());
@@ -494,6 +664,8 @@ async function refreshEverything() {
   await Promise.all([
     loadRuntimeStatus(),
     loadHardwareProfile(),
+    loadCloudProviders(),
+    loadCloudLaneAssignments(),
     loadModels(),
     loadLoras(),
     loadAssets(),
@@ -510,6 +682,40 @@ async function loadRuntimeStatus() {
     state.runtimeStatus = null;
   }
   renderStyleMode();
+}
+
+async function loadCloudProviders() {
+  try {
+    const response = await fetchJson("/api/cloud/providers");
+    state.cloudProviders = Array.isArray(response.providers) ? response.providers : [];
+    state.cloudApiKeyLanesEnabled = Boolean(response.api_key_lanes_enabled);
+  } catch {
+    state.cloudProviders = [];
+    state.cloudApiKeyLanesEnabled = false;
+  }
+  renderMediaGenerationCloudControls();
+  renderPromptAssistCloudControls();
+  renderVisionAssistCloudControls();
+}
+
+async function loadCloudLaneAssignments() {
+  try {
+    const response = await fetchJson("/api/cloud/lanes");
+    state.cloudLaneAssignments = response.lane_assignments || {
+      prompt_assist: "local_auto",
+      vision_assist: "local_auto",
+      media_generation: "local_only",
+    };
+  } catch {
+    state.cloudLaneAssignments = {
+      prompt_assist: "local_auto",
+      vision_assist: "local_auto",
+      media_generation: "local_only",
+    };
+  }
+  renderMediaGenerationCloudControls();
+  renderPromptAssistCloudControls();
+  renderVisionAssistCloudControls();
 }
 
 async function loadHardwareProfile() {
@@ -623,10 +829,17 @@ function refreshVideoSettingCopy() {
 
 function refreshAudioSettingCopy() {
   const selectedModel = getSelectedModel();
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
   const seconds = Math.max(1, Number(elements.audioDurationInput.value || 0));
   const segmentCount = getNormalizedAudioSegments().length;
   const isStableAudio = selectedModel?.backend === "audio_runtime" && !selectedModel?.supports_voice_output;
-  const isSpeechAudio = selectedModel?.backend === "audio_runtime" && selectedModel?.supports_voice_output;
+  const isCloudSpeechAudio = Boolean(
+    activeMediaCloudProvider
+    && elements.prepareKindInput.value === "audio"
+    && mediaGenerationSupportedKinds(activeMediaCloudProvider).includes("audio")
+  );
+  const isSpeechAudio = (selectedModel?.backend === "audio_runtime" && selectedModel?.supports_voice_output)
+    || isCloudSpeechAudio;
 
   if (isStableAudio) {
     if (isAdvancedAudioSegmentsEnabled(selectedModel) && segmentCount > 1) {
@@ -640,6 +853,10 @@ function refreshAudioSettingCopy() {
   if (isSpeechAudio) {
     if (isAdvancedAudioSegmentsEnabled(selectedModel) && segmentCount > 1) {
       elements.audioDurationCopy.textContent = `Speech-style audio models mainly care about prompt length. In advanced mode, ${segmentCount} script boxes become separate speech segments.`;
+      return;
+    }
+    if (isCloudSpeechAudio) {
+      elements.audioDurationCopy.textContent = "Cloud speech output mainly cares about spoken text length and delivery notes. This duration control is mostly for local soundscape/SFX audio.";
       return;
     }
     elements.audioDurationCopy.textContent = "Speech-style audio models mainly care about prompt length and optional voice reference. This duration control is mostly for soundscape/SFX audio.";
@@ -977,9 +1194,14 @@ function getNormalizedAudioSegments() {
 }
 
 function isAdvancedAudioSegmentsEnabled(model = getSelectedModel()) {
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const cloudSpeechAudio = Boolean(
+    activeMediaCloudProvider
+    && elements.prepareKindInput.value === "audio"
+    && mediaGenerationSupportedKinds(activeMediaCloudProvider).includes("audio")
+  );
   return Boolean(
-    model
-    && model.backend === "audio_runtime"
+    ((model && model.backend === "audio_runtime") || cloudSpeechAudio)
     && state.workflowMode === "advanced"
   );
 }
@@ -995,8 +1217,14 @@ function seedAudioSegmentsFromBasicField(model = getSelectedModel()) {
 
 function renderAudioPromptInputs() {
   const selectedModel = getSelectedModel();
-  const isDedicatedAudioModel = selectedModel && selectedModel.backend === "audio_runtime";
-  const isSpeechAudio = isDedicatedAudioModel && selectedModel.supports_voice_output;
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const cloudSpeechAudio = Boolean(
+    activeMediaCloudProvider
+    && elements.prepareKindInput.value === "audio"
+    && mediaGenerationSupportedKinds(activeMediaCloudProvider).includes("audio")
+  );
+  const isDedicatedAudioModel = (selectedModel && selectedModel.backend === "audio_runtime") || cloudSpeechAudio;
+  const isSpeechAudio = cloudSpeechAudio || (selectedModel && selectedModel.backend === "audio_runtime" && selectedModel.supports_voice_output);
   const advancedAudio = isAdvancedAudioSegmentsEnabled(selectedModel);
 
   if (advancedAudio) {
@@ -1640,10 +1868,11 @@ function renderModels() {
   const visibleModels = getVisibleModels();
   const supportedModels = visibleModels.filter((model) => model.runtime_supported);
   const unsupportedModels = visibleModels.filter((model) => !model.runtime_supported);
+  const cloudRoutes = getMediaGenerationCloudRoutes();
   const hiddenModeCount = state.models.length - visibleModels.length;
 
-  if (!state.models.length) {
-    elements.modelSelect.innerHTML = `<option value="">No local models found in models/</option>`;
+  if (!state.models.length && !cloudRoutes.length) {
+    elements.modelSelect.innerHTML = `<option value="">No local or cloud models found</option>`;
     elements.modelSelect.disabled = true;
     renderStyleMode();
     renderModelNotice("Drop one or more GGUF models or supported local model packages into models/ and press Refresh Files.");
@@ -1656,7 +1885,7 @@ function renderModels() {
     return;
   }
 
-  if (!visibleModels.length) {
+  if (!visibleModels.length && !cloudRoutes.length) {
     const label = state.generationStyle === "realism" ? "No realism models found" : "No expressive models found";
     elements.modelSelect.innerHTML = `<option value="">${label}</option>`;
     elements.modelSelect.disabled = true;
@@ -1675,7 +1904,7 @@ function renderModels() {
     return;
   }
 
-  if (!supportedModels.length) {
+  if (!supportedModels.length && !cloudRoutes.length) {
     elements.modelSelect.disabled = false;
     elements.modelSelect.innerHTML = `
       <option value="">No ready-to-run ${escapeHtml(state.generationStyle)} models</option>
@@ -1703,18 +1932,31 @@ function renderModels() {
   const supportedOptions = supportedModels
     .map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildDropdownLabel(model))}</option>`)
     .join("");
+  const cloudOptions = cloudRoutes.length
+    ? `<optgroup label="Cloud">${cloudRoutes
+        .map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildMediaCloudDropdownLabel(model))}</option>`)
+        .join("")}</optgroup>`
+    : "";
   const unsupportedOptions = unsupportedModels.length
     ? `<optgroup label="Detected but not ready">${unsupportedModels
         .map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildDropdownLabel(model))}</option>`)
         .join("")}</optgroup>`
     : "";
 
-  elements.modelSelect.innerHTML = `<optgroup label="Ready to run">${supportedOptions}</optgroup>${unsupportedOptions}`;
+  elements.modelSelect.innerHTML = `${supportedOptions ? `<optgroup label="Ready to run">${supportedOptions}</optgroup>` : ""}${cloudOptions}${unsupportedOptions}`;
 
-  if (selected && visibleModels.some((model) => model.id === selected)) {
+  const activeCloudRoute = activeMediaGenerationCloudRoute();
+  const activeCloudValue = activeCloudRoute ? activeCloudRoute.id : "";
+  if (selected && (visibleModels.some((model) => model.id === selected) || cloudRoutes.some((model) => model.id === selected))) {
     elements.modelSelect.value = selected;
-  } else {
+  } else if (activeCloudValue && cloudRoutes.some((model) => model.id === activeCloudValue)) {
+    elements.modelSelect.value = activeCloudValue;
+  } else if (supportedModels.length) {
     elements.modelSelect.value = supportedModels[0].id;
+  } else if (cloudRoutes.length) {
+    elements.modelSelect.value = cloudRoutes[0].id;
+  } else {
+    elements.modelSelect.value = unsupportedModels[0]?.id || "";
   }
 
   normalizeAssignedReferencesForCurrentModel();
@@ -1729,6 +1971,20 @@ function renderModels() {
 }
 
 function renderPrepareKindOptions() {
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const current = elements.prepareKindInput.value;
+  if (activeMediaCloudProvider) {
+    const supportedKinds = mediaGenerationSupportedKinds(activeMediaCloudProvider);
+    elements.prepareKindInput.innerHTML = supportedKinds
+      .map((kind) => `<option value="${escapeHtml(kind)}">${escapeHtml(formatKind(kind))}</option>`)
+      .join("");
+    elements.prepareKindInput.value = supportedKinds.includes(current)
+      ? current
+      : (supportedKinds[0] || "image");
+    normalizeAssignedReferencesForCurrentModel();
+    return;
+  }
+
   const model = getSelectedModel();
   const fallbackKinds = state.generationStyle === "realism"
     ? ["image", "gif", "video"]
@@ -1736,7 +1992,6 @@ function renderPrepareKindOptions() {
   const supportedKinds = model
     ? ((model.supported_kinds || []).length ? model.supported_kinds : fallbackKinds)
     : fallbackKinds;
-  const current = elements.prepareKindInput.value;
 
   elements.prepareKindInput.innerHTML = supportedKinds
     .map((kind) => `<option value="${escapeHtml(kind)}">${escapeHtml(formatKind(kind))}</option>`)
@@ -1747,9 +2002,30 @@ function renderPrepareKindOptions() {
   } else {
     elements.prepareKindInput.value = supportedKinds[0] || "image";
   }
+  normalizeAssignedReferencesForCurrentModel();
 }
 
 function renderModelSummary(hiddenModeCount = null) {
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  if (activeMediaCloudProvider) {
+    const cloudRoute = activeMediaGenerationCloudRoute();
+    if (cloudRoute) {
+      elements.modelSummary.innerHTML = buildCloudGenerationSummary(
+        cloudRoute,
+        `Final output is currently routed through ${cloudRoute.providerName} using ${cloudRoute.modelName} for ${formatKind(cloudRoute.outputKind).toLowerCase()} generation. This selection reuses the saved cloud media lane instead of a local GGUF runtime.`
+      );
+      refreshAudioSettingCopy();
+      return;
+    }
+    const kinds = mediaGenerationSupportedKinds(activeMediaCloudProvider)
+      .map((kind) => formatKind(kind).toLowerCase())
+      .join(" + ");
+    renderModelNotice(
+      `Cloud output route is active via ${activeMediaCloudProvider.display_name}. Local model selection is bypassed for final ${kinds || "media"} generation on this lane.`
+    );
+    return;
+  }
+
   const model = getSelectedModel();
   if (!model) {
     const invisibleCount = hiddenModeCount ?? state.models.filter((entry) => entry.generation_style !== state.generationStyle).length;
@@ -1837,6 +2113,112 @@ function renderModelSummary(hiddenModeCount = null) {
     </div>
   `;
   refreshAudioSettingCopy();
+}
+
+function buildMediaCloudDropdownLabel(model) {
+  const provider = providerKindLabel(model.providerKind);
+  const kindLabel = formatKind(model.outputKind);
+  return `${kindLabel} | ${model.modelName} | ${provider} | ${model.providerName} [Cloud Route]`;
+}
+
+function cloudRouteIdentity(model, laneLabel) {
+  return `${laneLabel} | ${model.modelName} | ${providerKindLabel(model.providerKind)} | ${model.providerName}`;
+}
+
+function cloudGenerationRouteUsageDetails(model) {
+  if (model.outputKind === "video") {
+    if (model.providerKind === "open_ai") {
+      return {
+        bestFit: "short MP4 video clips on the saved OpenAI video route",
+        watchFor: "duration buckets of 4, 8, 12, 16, or 20 seconds; 1080p is reserved for sora-2-pro; still-image guide only",
+        note: "This route currently uses the deprecated OpenAI Videos API path and must be replaced before September 24, 2026.",
+      };
+    }
+    if (model.providerKind === "gemini") {
+      return {
+        bestFit: "short MP4 video clips on the saved Gemini Veo route",
+        watchFor: "duration buckets of 4, 6, or 8 seconds; still-image guide only; guide-image runs require 8 seconds",
+        note: "This route currently uses Gemini's compatible video bridge and only surfaces the main still-image guide reference.",
+      };
+    }
+    return {
+      bestFit: "short MP4 video clips on the saved cloud video route",
+      watchFor: "provider-specific size, duration, and still-image guide limits",
+      note: "Cloud video currently accepts only the main still-image guide reference on supported routes.",
+    };
+  }
+
+  if (model.outputKind === "audio") {
+    return {
+      bestFit: "speech-style audio output on the saved cloud route",
+      watchFor: "provider-specific voice or speaker ids and speech pacing differences",
+      note: "Cloud speech currently does not upload guide, end-frame, control-video, or voice-reference tray files.",
+    };
+  }
+
+  return {
+    bestFit: "final still-image output on the saved cloud route",
+    watchFor: "provider-specific latency, moderation checks, and image-edit/reference limits",
+    note: "Cloud image output currently accepts only still-image guide references on supported routes.",
+  };
+}
+
+function buildCloudGenerationSummary(model, message) {
+  const verificationStatus = model.verification?.status ? model.verification.status : "Not verified yet.";
+  const providerBits = [
+    providerKindLabel(model.providerKind),
+    model.providerName,
+    model.hasApiKey ? "API key saved" : "No API key saved",
+  ];
+  const routeLabel = formatKind(model.outputKind);
+  const routeDetail = model.outputKind === "audio"
+    ? `${model.modelName}${model.audioVoice ? ` | Voice: ${model.audioVoice}` : " | Provider default voice"}`
+    : model.modelName;
+  const usage = cloudGenerationRouteUsageDetails(model);
+  return `
+    <div class="model-summary-card">
+      <div class="model-summary-head">
+        <strong class="model-summary-name">${escapeHtml(model.modelName)}</strong>
+      </div>
+      <div class="model-badges">
+        ${createModelBadge("Cloud", "backend")}
+        ${createModelBadge(providerKindLabel(model.providerKind), "family")}
+        ${createModelBadge(routeLabel, "outputs")}
+      </div>
+      <div class="model-summary-runtime">${escapeHtml(providerBits.join(" | "))}</div>
+      <div class="model-summary-copy">${escapeHtml(message)}</div>
+      <div class="recommended-limits">
+        <div class="recommended-limits-head">
+          <strong>Cloud Route Details</strong>
+          <span>${escapeHtml(model.baseUrl || "Saved route endpoint")}</span>
+        </div>
+        <div class="recommended-limits-list">
+          <div class="recommended-limit-row current-safe">
+            <strong>${escapeHtml(`${routeLabel} Route`)}</strong>
+            <span>${escapeHtml(`Provider account: ${model.providerName}`)}</span>
+            <span>${escapeHtml(`Configured model: ${routeDetail}`)}</span>
+            <span class="recommended-current current-safe"><em>Verification:</em> ${escapeHtml(verificationStatus)}</span>
+            <span class="recommended-current-note">This route is route-aware rather than hardware-aware. Latency, queue time, moderation checks, and policy behavior can vary by endpoint family and output kind.</span>
+          </div>
+          <div class="recommended-limit-row current-stretch">
+            <strong>Privacy</strong>
+            <span>Prompts leave this machine only when this cloud route stays selected.</span>
+            <span>Only references supported by the current cloud output kind can be uploaded.</span>
+            <span class="recommended-current current-stretch"><em>Route:</em> ${escapeHtml(cloudRouteIdentity(model, routeLabel))}</span>
+            <span class="recommended-current-note">Prompt Assist and Vision Assist remain separate role selectors and can still stay local or use their own cloud routes.</span>
+          </div>
+          <div class="recommended-limit-row current-risky">
+            <strong>Usage shape</strong>
+            <span><em>Best fit:</em> ${escapeHtml(usage.bestFit)}</span>
+            <span><em>Watch for:</em> ${escapeHtml(usage.watchFor)}</span>
+            <span class="recommended-current current-risky"><em>Route note:</em> ${escapeHtml(usage.note)}</span>
+            <span class="recommended-current-note">This keeps the existing selector workflow, but makes the active cloud route's real constraints visible where hardware guidance would normally appear.</span>
+          </div>
+        </div>
+        <div class="recommended-limits-note">This uses the same selector workflow as local models, but swaps hardware guidance for account, verification, privacy, and route-specific details.</div>
+      </div>
+    </div>
+  `;
 }
 
 function buildExplicitRuntimeLine(model) {
@@ -2355,6 +2737,18 @@ function parseDimensionPair(value) {
       return [512, 512];
     case "square768":
       return [768, 768];
+    case "video_landscape720":
+      return [1280, 720];
+    case "video_portrait720":
+      return [720, 1280];
+    case "video_landscape1024":
+      return [1792, 1024];
+    case "video_portrait1024":
+      return [1024, 1792];
+    case "video_landscape1080":
+      return [1920, 1080];
+    case "video_portrait1080":
+      return [1080, 1920];
     case "landscape720":
       return [1280, 720];
     case "portrait768":
@@ -2492,7 +2886,9 @@ function primaryReferenceAssignmentLabel(model = getSelectedModel()) {
 function primaryReferenceEmptyDetail(model = getSelectedModel()) {
   return isSpeechVoiceReferenceModel(model)
     ? "No voice reference assigned."
-    : "No primary guide/edit input assigned.";
+    : cloudPrimaryReferenceUsesGuideOnly()
+      ? "No primary guide image assigned."
+      : "No primary guide/edit input assigned.";
 }
 
 function primaryReferenceFilledDetail(model = getSelectedModel()) {
@@ -2501,10 +2897,20 @@ function primaryReferenceFilledDetail(model = getSelectedModel()) {
     : `${referenceIntentLabel(state.referenceIntent)}`;
 }
 
+function cloudPrimaryReferenceUsesGuideOnly() {
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const cloudOutputKind = elements.prepareKindInput.value;
+  return Boolean(
+    activeMediaCloudProvider
+    && (cloudOutputKind === "image" || cloudOutputKind === "video")
+  );
+}
+
 function renderReferenceIntentControls() {
   const context = getReferenceAssignmentContext();
   const selectedAssetId = state.selectedReference?.id;
   const speechVoiceModel = isSpeechVoiceReferenceModel();
+  const cloudGuideOnly = cloudPrimaryReferenceUsesGuideOnly();
 
   elements.referenceVoice.classList.toggle(
     "active",
@@ -2523,7 +2929,7 @@ function renderReferenceIntentControls() {
 
   elements.referenceVoice.classList.toggle("hidden", !speechVoiceModel);
   elements.referenceGuide.classList.toggle("hidden", speechVoiceModel);
-  elements.referenceEdit.classList.toggle("hidden", speechVoiceModel);
+  elements.referenceEdit.classList.toggle("hidden", speechVoiceModel || cloudGuideOnly);
   elements.referenceEnd.classList.toggle("hidden", speechVoiceModel);
   elements.referenceControl.classList.toggle("hidden", speechVoiceModel);
 
@@ -2540,8 +2946,45 @@ function renderReferenceIntentControls() {
 function getReferenceAssignmentContext() {
   const model = getSelectedModel();
   const asset = state.selectedReference;
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const cloudOutputKind = elements.prepareKindInput.value;
 
   if (!asset) {
+    if (activeMediaCloudProvider && cloudOutputKind === "audio") {
+      return {
+        voiceEnabled: false,
+        guideEnabled: false,
+        editEnabled: false,
+        endEnabled: false,
+        controlEnabled: false,
+        message: "Cloud speech output does not accept guide, end-frame, control-video, or voice-reference tray files, so nothing from the tray will be uploaded on this output lane.",
+      };
+    }
+
+    if (activeMediaCloudProvider && cloudOutputKind === "image") {
+      return {
+        voiceEnabled: false,
+        guideEnabled: false,
+        editEnabled: false,
+        endEnabled: false,
+        controlEnabled: false,
+        message: "Choose a still image first if you want to attach one guide image to the cloud image lane. End-frame and control-video references stay local-only.",
+      };
+    }
+
+    if (activeMediaCloudProvider && cloudOutputKind === "video") {
+      return {
+        voiceEnabled: false,
+        guideEnabled: false,
+        editEnabled: false,
+        endEnabled: false,
+        controlEnabled: false,
+        message: isGeminiCloudVideoProvider(activeMediaCloudProvider)
+          ? "Choose a still image first if you want to attach one guide image to the Gemini Veo lane. Gemini requires an 8-second duration when a still-image guide is attached. End-frame and control-video references stay local-only."
+          : "Choose a still image first if you want to attach one guide image to the cloud video lane. End-frame and control-video references stay local-only.",
+      };
+    }
+
     if (isSpeechVoiceReferenceModel(model)) {
       return {
         voiceEnabled: false,
@@ -2560,6 +3003,45 @@ function getReferenceAssignmentContext() {
       endEnabled: false,
       controlEnabled: false,
       message: "Choose a file first. Guide/Edit assign a start image. End Frame assigns the final still. Control Video assigns a motion guide from the tray.",
+    };
+  }
+
+  if (activeMediaCloudProvider && cloudOutputKind === "audio") {
+    return {
+      voiceEnabled: false,
+      guideEnabled: false,
+      editEnabled: false,
+      endEnabled: false,
+      controlEnabled: false,
+      message: "Cloud speech output does not use tray references yet, so this file will stay local unless you switch back to a compatible local lane.",
+    };
+  }
+
+  if (activeMediaCloudProvider && cloudOutputKind === "image") {
+    return {
+      voiceEnabled: false,
+      guideEnabled: asset.kind === "image",
+      editEnabled: false,
+      endEnabled: false,
+      controlEnabled: false,
+      message: asset.kind === "image"
+        ? `Assign this still image as the single guide reference for cloud image output via ${activeMediaCloudProvider.display_name}. End-frame and control-video slots stay local-only.`
+        : "Cloud image output only accepts a still-image guide from the tray. End-frame and control-video references stay local-only.",
+    };
+  }
+
+  if (activeMediaCloudProvider && cloudOutputKind === "video") {
+    return {
+      voiceEnabled: false,
+      guideEnabled: asset.kind === "image",
+      editEnabled: false,
+      endEnabled: false,
+      controlEnabled: false,
+      message: asset.kind === "image"
+        ? isGeminiCloudVideoProvider(activeMediaCloudProvider)
+          ? `Assign this still image as the single guide reference for Gemini Veo output via ${activeMediaCloudProvider.display_name}. Gemini requires an 8-second duration when a still-image guide is attached. End-frame and control-video slots stay local-only.`
+          : `Assign this still image as the single guide reference for cloud video output via ${activeMediaCloudProvider.display_name}. End-frame and control-video slots stay local-only.`
+        : "Cloud video output only accepts a still-image guide from the tray. End-frame and control-video references stay local-only.",
     };
   }
 
@@ -2691,20 +3173,26 @@ function renderPreview() {
   }
 
   elements.previewSurface.classList.remove("empty");
+  const outputRouteLabel = formatOutputRouteLabel(item);
+  const promptAssistLabel = formatLaneRouteLabel(item.prompt_assist_route);
+  const visionAssistLabel = formatLaneRouteLabel(item.vision_assist_route);
+  const outputSummaryLabel = summarizeOutputSurface(item);
   elements.previewSurface.innerHTML = `
     ${createMediaMarkup(item, "preview-media")}
     <div class="preview-meta">
       <h3>${escapeHtml(item.file_name)}</h3>
-      <span>${escapeHtml(formatKind(item.kind))} | ${escapeHtml(item.model || "Unknown model")} | ${escapeHtml(item.style || "expressive")} mode</span>
+      <span>${escapeHtml(outputSummaryLabel)}</span>
       <p>${escapeHtml(item.prompt || "Saved output")}</p>
       ${item.resolution_label ? `<p><strong>Output settings:</strong> ${escapeHtml(item.resolution_label)}</p>` : ""}
       ${item.negative_prompt ? `<p><strong>Negative prompt:</strong> ${escapeHtml(item.negative_prompt)}</p>` : ""}
       ${item.reference_asset ? `<p><strong>${escapeHtml(item.kind === "audio" && item.spoken_text ? "Voice reference" : "Reference use")}:</strong> ${escapeHtml(item.kind === "audio" && item.spoken_text ? item.reference_asset : `${referenceIntentLabel(item.reference_intent || "guide")} via ${item.reference_asset}`)}</p>` : ""}
       ${item.end_reference_asset ? `<p><strong>End frame:</strong> ${escapeHtml(item.end_reference_asset)}</p>` : ""}
       ${item.control_reference_asset ? `<p><strong>Control video:</strong> ${escapeHtml(item.control_reference_asset)}</p>` : ""}
+      ${outputRouteLabel ? `<p><strong>Output route:</strong> ${escapeHtml(outputRouteLabel)}</p>` : ""}
       ${item.spoken_text ? `<p><strong>Spoken text:</strong> ${escapeHtml(item.spoken_text)}</p>` : ""}
       ${item.compiled_prompt ? `<p><strong>${item.spoken_text ? "Speech direction:" : "Compiled brief:"}</strong> ${escapeHtml(item.compiled_prompt)}</p>` : ""}
-      ${item.prompt_assist && item.prompt_assist !== "off" ? `<p><strong>Prompt Assist:</strong> ${escapeHtml(item.prompt_assist)}${item.interpreter_model ? ` via ${escapeHtml(item.interpreter_model)}` : ""}</p>` : ""}
+      ${item.prompt_assist && item.prompt_assist !== "off" ? `<p><strong>Prompt Assist:</strong> ${escapeHtml(item.prompt_assist)}${item.interpreter_model ? ` via ${escapeHtml(item.interpreter_model)}` : ""}${promptAssistLabel ? ` (${escapeHtml(promptAssistLabel)})` : ""}</p>` : ""}
+      ${item.vision_model ? `<p><strong>Vision Assist:</strong> ${escapeHtml(item.vision_model)}${visionAssistLabel ? ` (${escapeHtml(visionAssistLabel)})` : ""}</p>` : ""}
       <p>${escapeHtml(item.note || "")}</p>
     </div>
   `;
@@ -2734,7 +3222,7 @@ function renderHistory() {
             ${preview}
             <div class="history-copy">
               <strong>${escapeHtml(output.file_name)}</strong>
-              <span>${escapeHtml(output.model || "Unknown model")}</span>
+              <span>${escapeHtml(buildHistoryCardSubtitle(output))}</span>
             </div>
           </button>
         </div>
@@ -2764,7 +3252,6 @@ function renderOutputHandoffPanel() {
   const loraTarget = getLoraHandoffTarget();
   const selectedOutputs = getSelectedOutputs();
   const selectedCount = selectedOutputs.length;
-  const hasBridge = Boolean(window.chattyCogBridge?.available);
 
   elements.outputHandoffPanel.classList.toggle("hidden", !state.outputs.length);
   if (!state.outputs.length) {
@@ -2883,9 +3370,10 @@ function getSelectedOutputs() {
 
 function buildOutputHandoffSummary(output) {
   const parts = [
-    output.prompt ? `Prompt: ${output.prompt}` : "",
+    summarizeOutputSurface(output),
+    output.spoken_text ? `Spoken: ${truncateBridgeText(output.spoken_text, 90)}` : "",
+    output.prompt ? `Prompt: ${truncateBridgeText(output.prompt, 140)}` : "",
     output.model ? `Model: ${output.model}` : "",
-    output.kind ? `Kind: ${output.kind}` : "",
     output.relative_path ? `Path: ${output.relative_path}` : "",
   ].filter(Boolean);
   return parts.join(" | ") || "Saved Chatty-art output.";
@@ -2895,6 +3383,18 @@ function buildOutputHandoffTags(output) {
   const tags = ["chatty-art", "generated-output"];
   if (output.kind) {
     tags.push(`kind:${String(output.kind).toLowerCase()}`);
+  }
+  if (output.output_route) {
+    tags.push(`output-route:${String(output.output_route).toLowerCase()}`);
+  }
+  if (output.prompt_assist_route) {
+    tags.push(`prompt-assist-route:${String(output.prompt_assist_route).toLowerCase()}`);
+  }
+  if (output.vision_assist_route) {
+    tags.push(`vision-assist-route:${String(output.vision_assist_route).toLowerCase()}`);
+  }
+  if (output.kind === "audio" && output.spoken_text) {
+    tags.push("audio:speech");
   }
   if (output.model) {
     const lower = String(output.model).toLowerCase();
@@ -3050,12 +3550,59 @@ function normalizeOutputBridgePath(relativePath) {
 
 function summarizeOutputForHandoff(output) {
   const parts = [
+    summarizeOutputSurface(output),
+    output.spoken_text ? `Spoken: ${truncateBridgeText(output.spoken_text, 100)}` : "",
     output.prompt ? truncateBridgeText(output.prompt, 180) : "",
     output.model ? `Model: ${output.model}` : "",
     output.style ? `Mode: ${output.style}` : "",
     output.resolution_label ? `Settings: ${output.resolution_label}` : "",
   ].filter(Boolean);
   return parts.join(" | ");
+}
+
+function buildHistoryCardSubtitle(output) {
+  const route = formatOutputRouteLabel(output);
+  const kind = formatKind(output.kind);
+  const model = output.model || "Unknown model";
+  if (output.kind === "audio" && output.spoken_text) {
+    return `${kind} speech | ${route || "Saved output"} | ${model}`;
+  }
+  return `${kind} | ${route || "Saved output"} | ${model}`;
+}
+
+function summarizeOutputSurface(output) {
+  const kind = formatKind(output.kind);
+  const route = formatOutputRouteLabel(output);
+  const style = output.style || "expressive";
+  const model = output.model || "Unknown model";
+  if (output.kind === "audio" && output.spoken_text) {
+    return `${kind} speech | ${model} | ${route || `${style} mode`}`;
+  }
+  return `${kind} | ${model} | ${route || `${style} mode`}`;
+}
+
+function formatLaneRouteLabel(route) {
+  if (route === "cloud") return "Cloud lane";
+  if (route === "local") return "Local lane";
+  return "";
+}
+
+function formatOutputRouteLabel(output) {
+  if (!output?.output_route) {
+    return "";
+  }
+  if (output.output_route === "cloud") {
+    return output.kind === "audio" && output.spoken_text
+      ? "Cloud speech lane"
+      : "Cloud media lane";
+  }
+  if (output.output_route === "local") {
+    if (output.backend === "audio_runtime") {
+      return output.spoken_text ? "Local speech lane" : "Local audio lane";
+    }
+    return "Local lane";
+  }
+  return String(output.output_route);
 }
 
 function renderAssignedReferences() {
@@ -3120,6 +3667,15 @@ function setSelectedReference(asset) {
 
 function assignSelectedReference(slot, intent = state.referenceIntent) {
   if (!state.selectedReference) {
+    return;
+  }
+  const context = getReferenceAssignmentContext();
+  const slotAllowed = slot === "primary"
+    ? (intent === "edit" ? context.editEnabled : (context.guideEnabled || context.voiceEnabled))
+    : slot === "end"
+      ? context.endEnabled
+      : context.controlEnabled;
+  if (!slotAllowed) {
     return;
   }
 
@@ -3195,6 +3751,38 @@ function reconcileAssignedAssets() {
 
 function normalizeAssignedReferencesForCurrentModel() {
   const model = getSelectedModel();
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const cloudOutputKind = elements.prepareKindInput.value;
+
+  if (activeMediaCloudProvider) {
+    if (cloudOutputKind === "audio") {
+      state.referenceIntent = "guide";
+      state.primaryReference = null;
+      state.endReference = null;
+      state.controlReference = null;
+      return;
+    }
+
+    if (cloudOutputKind === "image") {
+      state.referenceIntent = "guide";
+      if (state.primaryReference && state.primaryReference.kind !== "image") {
+        state.primaryReference = null;
+      }
+      state.endReference = null;
+      state.controlReference = null;
+      return;
+    }
+
+    if (cloudOutputKind === "video") {
+      state.referenceIntent = "guide";
+      if (state.primaryReference && state.primaryReference.kind !== "image") {
+        state.primaryReference = null;
+      }
+      state.endReference = null;
+      state.controlReference = null;
+      return;
+    }
+  }
 
   if (state.generationStyle !== "realism") {
     state.endReference = null;
@@ -3268,42 +3856,150 @@ function toggleColumn(column, open) {
 
 function syncActionState() {
   const model = getSelectedModel();
-  const assignedReferencesValid = areAssignedReferencesCompatible(model);
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const assignedReferencesValid = activeMediaCloudProvider
+    ? areCloudMediaReferencesCompatible()
+    : areAssignedReferencesCompatible(model);
   const prepareKind = elements.prepareKindInput.value;
-  const prepareSupported = model && model.runtime_supported && kindSupported(model, prepareKind);
+  const cloudKinds = activeMediaCloudProvider ? mediaGenerationSupportedKinds(activeMediaCloudProvider) : [];
+  const prepareSupported = activeMediaCloudProvider
+    ? cloudKinds.includes(prepareKind)
+    : model && model.runtime_supported && kindSupported(model, prepareKind);
   elements.prepareRequestButton.disabled = state.preparing || state.generating || !prepareSupported || !assignedReferencesValid;
   elements.clearPreparedButton.disabled = !state.preparedHandoff;
   elements.actionButtons.forEach((button) => {
-    const supported = model && model.runtime_supported && kindSupported(model, button.dataset.kind);
+    const supported = activeMediaCloudProvider
+      ? cloudKinds.includes(button.dataset.kind)
+      : model && model.runtime_supported && kindSupported(model, button.dataset.kind);
     button.disabled = state.generating || state.preparing || !supported || !assignedReferencesValid;
   });
   elements.cancelGenerateButton.disabled = !state.generating || !state.currentJobId || state.canceling;
 }
 
+function areCloudMediaReferencesCompatible() {
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const cloudAudio = elements.prepareKindInput.value === "audio";
+  if (cloudAudio) {
+    return !state.primaryReference && !state.endReference && !state.controlReference;
+  }
+  if (state.endReference) {
+    return false;
+  }
+  if (state.controlReference) {
+    return false;
+  }
+  if (state.primaryReference && state.primaryReference.kind !== "image") {
+    return false;
+  }
+  if (elements.prepareKindInput.value === "video" && isGeminiCloudVideoProvider(activeMediaCloudProvider)) {
+    const requestedSeconds = Number(elements.videoDurationInput.value || 0);
+    if (![4, 6, 8].includes(requestedSeconds)) {
+      return false;
+    }
+    if (state.primaryReference && requestedSeconds !== 8) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function cloudMediaReferenceValidationMessage() {
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const cloudAudio = elements.prepareKindInput.value === "audio";
+  const cloudVideo = elements.prepareKindInput.value === "video";
+  if (cloudAudio) {
+    if (state.primaryReference) {
+      return "Cloud speech generation does not support guide-image or voice-reference uploads yet.";
+    }
+    if (state.endReference) {
+      return "Cloud speech generation does not support end-frame references.";
+    }
+    if (state.controlReference) {
+      return "Cloud speech generation does not support control-video references.";
+    }
+    return "";
+  }
+  if (state.endReference) {
+    return cloudVideo
+      ? "Cloud video generation does not support end-frame references yet."
+      : "Cloud image generation does not support end-frame references yet.";
+  }
+  if (state.controlReference) {
+    return cloudVideo
+      ? "Cloud video generation does not support control-video references yet."
+      : "Cloud image generation does not support control-video references yet.";
+  }
+  if (state.primaryReference && state.primaryReference.kind !== "image") {
+    return cloudVideo
+      ? "Cloud video generation currently only supports one still-image guide reference."
+      : "Cloud image generation currently only supports still-image guide references.";
+  }
+  if (cloudVideo) {
+    const requestedSeconds = Number(elements.videoDurationInput.value || 0);
+    if (isGeminiCloudVideoProvider(activeMediaCloudProvider) && ![4, 6, 8].includes(requestedSeconds)) {
+      return "Gemini cloud video requires a duration of 4, 6, or 8 seconds.";
+    }
+    if (isGeminiCloudVideoProvider(activeMediaCloudProvider) && state.primaryReference && requestedSeconds !== 8) {
+      return "Gemini cloud video requires an 8-second duration when using a still-image guide reference.";
+    }
+    const [width, height] = parseDimensionPair(elements.videoResolutionInput.value);
+    const current = `${width}x${height}`;
+    const allowed = ["1280x720", "720x1280", "1792x1024", "1024x1792", "1920x1080", "1080x1920"];
+    if (!allowed.includes(current)) {
+      return "Cloud video generation currently expects one of these video sizes: 1280x720, 720x1280, 1792x1024, 1024x1792, 1920x1080, or 1080x1920.";
+    }
+    if (isOpenAiCloudVideoProvider(activeMediaCloudProvider) && ![4, 8, 12, 16, 20].includes(requestedSeconds)) {
+      return "OpenAI cloud video currently expects a duration of 4, 8, 12, 16, or 20 seconds.";
+    }
+    if (isOpenAiCloudVideoProvider(activeMediaCloudProvider) && !isOpenAiProVideoModel(activeMediaCloudProvider) && ["1920x1080", "1080x1920"].includes(current)) {
+      return "OpenAI cloud video reserves 1920x1080 and 1080x1920 for sora-2-pro. Use 1280x720, 720x1280, 1792x1024, or 1024x1792 on sora-2.";
+    }
+  }
+  return "";
+}
+
 function buildAcceptedMessage(model, kind, batchTotal = 1) {
   const assistMode = elements.promptAssistInput.value;
   const usingPreparedHandoff = state.preparedHandoff && state.preparedHandoff.kind === kind;
+  const activeCloudProvider = activePromptAssistCloudProvider();
+  const activeVisionCloudProvider = activeVisionAssistCloudProvider();
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  const kindLabel = formatKind(kind).toLowerCase();
   const assistNote = usingPreparedHandoff
     ? " Preview Handoff was locked in for this run."
     : assistMode === "off"
     ? ""
+    : activeCloudProvider
+    ? ` Prompt Assist (${assistMode}) will compile a richer cloud brief first via ${activeCloudProvider.display_name}.`
     : ` Prompt Assist (${assistMode}) will compile a richer local brief first.`;
-  const kindLabel = formatKind(kind).toLowerCase();
+  const visionNote = activeVisionCloudProvider && state.primaryReference?.kind === "image" && assistMode !== "off"
+    ? ` Vision Assist will inspect the reference image through ${activeVisionCloudProvider.display_name}.`
+    : "";
+  const mediaNote = activeMediaCloudProvider
+    ? ` Final ${kindLabel} output will be generated through ${activeMediaCloudProvider.display_name}.`
+    : "";
   const batchNote = batchTotal > 1
     ? ` Sequential batch mode will run ${batchTotal} end-to-end generations with a fresh random seed each time.`
     : "";
 
+  if (activeMediaCloudProvider) {
+    const videoRouteNote = kind === "video"
+      ? mediaGenerationVideoRouteNote(activeMediaCloudProvider)
+      : "";
+    return `Job accepted. Starting cloud ${kind === "audio" ? "speech" : kindLabel} generation.${batchNote}${assistNote}${visionNote}${mediaNote}${videoRouteNote}`;
+  }
+
   if (state.generationStyle === "realism") {
-    return `Job accepted. Starting the local realism pipeline for ${kindLabel}. The first realism run can take longer while stable-diffusion.cpp gets ready.${batchNote}${assistNote}`;
+    return `Job accepted. Starting the local realism pipeline for ${kindLabel}. The first realism run can take longer while stable-diffusion.cpp gets ready.${batchNote}${assistNote}${visionNote}`;
   }
 
   const largePlanner =
     /\b(14b|20b|22b|32b|70b)\b/i.test(model.name) || /\b(gpt-oss|qwq)\b/i.test(model.name);
   if (largePlanner) {
-    return `Job accepted. Starting local planning with ${model.name} for ${kindLabel}. Bigger GGUFs can spend a few minutes planning before rendering begins.${batchNote}${assistNote}`;
+    return `Job accepted. Starting local planning with ${model.name} for ${kindLabel}. Bigger GGUFs can spend a few minutes planning before rendering begins.${batchNote}${assistNote}${visionNote}`;
   }
 
-  return `Job accepted. Starting local planning for ${kindLabel}. The first progress update may take a few seconds.${batchNote}${assistNote}`;
+  return `Job accepted. Starting local planning for ${kindLabel}. The first progress update may take a few seconds.${batchNote}${assistNote}${visionNote}`;
 }
 
 function clearPreparedHandoff() {
@@ -3343,6 +4039,7 @@ function renderPreparedHandoff() {
 
   const isSpeechAudio = handoff.kind === "audio" && handoff.supports_voice_output;
   const isSoundAudio = handoff.kind === "audio" && !handoff.supports_voice_output;
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
   elements.preparedEmpty.classList.add("hidden");
   elements.preparedPanel.classList.remove("hidden");
   elements.preparedPromptTitle.textContent = isSpeechAudio
@@ -3373,7 +4070,18 @@ function renderPreparedHandoff() {
     createPreparedChip(`For ${formatKind(handoff.kind)}`),
     createPreparedChip(handoff.resolution_label || "Current settings"),
     createPreparedChip(`Estimate ${formatDurationRange(handoff.estimated_time)}`),
+    activeMediaCloudProvider ? createPreparedChip("Cloud Output Route") : createPreparedChip("Local Output Route"),
+    handoff.interpreter_model && handoff.interpreter_model.includes("(cloud:")
+      ? createPreparedChip("Cloud Prompt Assist")
+      : handoff.prompt_assist && handoff.prompt_assist !== "off"
+        ? createPreparedChip("Local Prompt Assist")
+        : "",
     handoff.interpreter_model ? createPreparedChip(`Interpreter ${handoff.interpreter_model}`) : "",
+    handoff.vision_model && handoff.vision_model.includes("(cloud:")
+      ? createPreparedChip("Cloud Vision Assist")
+      : handoff.vision_model
+        ? createPreparedChip("Local Vision Assist")
+        : "",
     handoff.vision_model ? createPreparedChip(`Vision Assist ${handoff.vision_model}`) : "",
     ...(Array.isArray(handoff.selected_lora_labels) && handoff.selected_lora_labels.length
       ? handoff.selected_lora_labels.map((label) => createPreparedChip(`LoRA ${label}`))
@@ -3388,6 +4096,7 @@ function renderPreparedHandoff() {
 
   const noteParts = [
     handoff.note,
+    activeMediaCloudProvider ? `Final output route: ${activeMediaCloudProvider.display_name}.` : "",
     handoff.reference_note,
     handoff.hardware_note,
   ].filter(Boolean);
@@ -3456,14 +4165,14 @@ function formatEstimateConfidence(confidence) {
 
 function buildBasePayload(kind) {
   const model = getSelectedModel();
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
   const prompt = elements.promptInput.value.trim();
   const negativePrompt = elements.negativePromptInput.value.trim();
   const audioLiteralPrompt = elements.audioLiteralPromptInput.value.trim();
   const batchCount = parseBatchCountInput();
   const includeAudioLiteral =
     kind === "audio"
-    && model
-    && model.backend === "audio_runtime";
+    && (activeMediaCloudProvider || (model && model.backend === "audio_runtime"));
   const audioSegments = includeAudioLiteral && state.workflowMode === "advanced"
     ? getNormalizedAudioSegments()
     : [];
@@ -3483,7 +4192,7 @@ function buildBasePayload(kind) {
     manual_change_targets: includeManualPromptControls ? parsePromptListInput(elements.manualChangeInput.value) : [],
     manual_avoid_items: includeManualPromptControls ? parsePromptListInput(elements.manualAvoidInput.value) : [],
     prompt_assist: elements.promptAssistInput.value,
-    model: model.id,
+    model: activeMediaCloudProvider ? `cloud:${activeMediaCloudProvider.id}` : model.id,
     kind,
     style: state.generationStyle,
     settings: {
@@ -3506,8 +4215,8 @@ function buildBasePayload(kind) {
     reference_intent: state.referenceIntent,
     end_reference_asset: state.endReference ? state.endReference.id : null,
     control_reference_asset: state.controlReference ? state.controlReference.id : null,
-    selected_prompt_model: elements.promptModelSelect.value || null,
-    selected_vision_model: elements.visionModelSelect.value || null,
+    selected_prompt_model: selectedPromptAssistLocalModelId(),
+    selected_vision_model: selectedVisionAssistLocalModelId(),
     selected_lora: includeLora ? selectedLoras[0].id : null,
     selected_lora_weight: includeLora ? selectedLoras[0].weight : null,
     selected_loras: includeLora ? selectedLoras : [],
@@ -3537,6 +4246,7 @@ function parseBatchCountInput() {
 function refreshBatchCountCopy() {
   const batchCount = parseBatchCountInput();
   const model = getSelectedModel();
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
   const kind = elements.prepareKindInput.value || "image";
   const kindLabel = formatKind(kind).toLowerCase();
   const selectedLoras = getNormalizedLoraSelections().length;
@@ -3549,32 +4259,47 @@ function refreshBatchCountCopy() {
     return;
   }
 
-  const modelNote = model ? ` using ${model.name}` : "";
+  const modelNote = activeMediaCloudProvider
+    ? ` through ${activeMediaCloudProvider.display_name}`
+    : model
+      ? ` using ${model.name}`
+      : "";
   elements.batchCountCopy.textContent = `This will run ${batchCount} ${kindLabel} generation${batchCount === 1 ? "" : "s"} one after another${modelNote}. Prompt, settings, references, and LoRA stack stay the same. Each run gets a fresh random seed, like clearing the seed box and pressing Generate again.${loraNote}`;
 }
 
 async function prepareGenerationRequest() {
   const model = getSelectedModel();
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
   const kind = elements.prepareKindInput.value;
 
-  if (!model) {
+  if (!model && !activeMediaCloudProvider) {
     setProgress(0, "Model", `Choose a ${state.generationStyle} model first.`);
     return;
   }
 
-  if (!kindSupported(model, kind)) {
+  if (activeMediaCloudProvider && !mediaGenerationSupportedKinds(activeMediaCloudProvider).includes(kind)) {
+    setProgress(0, "Output Route", `${activeMediaCloudProvider.display_name} is not configured for cloud ${formatKind(kind).toLowerCase()} generation.`);
+    return;
+  }
+
+  if (!activeMediaCloudProvider && !kindSupported(model, kind)) {
     setProgress(0, "Mode", `${model.name} does not currently support ${kind} generation in ${state.generationStyle} mode.`);
     return;
   }
 
-  if (!areAssignedReferencesCompatible(model)) {
+  if (activeMediaCloudProvider && !areCloudMediaReferencesCompatible()) {
+    setProgress(0, "Reference", cloudMediaReferenceValidationMessage());
+    return;
+  }
+
+  if (!activeMediaCloudProvider && !areAssignedReferencesCompatible(model)) {
     setProgress(0, "Reference", getAssignedReferenceValidationMessage(model));
     return;
   }
 
   const prompt = elements.promptInput.value.trim();
   const audioLiteralPrompt = elements.audioLiteralPromptInput.value.trim();
-  const canUseAudioLiteral = model.backend === "audio_runtime" && kind === "audio";
+  const canUseAudioLiteral = kind === "audio" && (activeMediaCloudProvider || model?.backend === "audio_runtime");
   const audioSegments = canUseAudioLiteral && state.workflowMode === "advanced"
     ? getNormalizedAudioSegments()
     : [];
@@ -3595,10 +4320,27 @@ async function prepareGenerationRequest() {
 
   const payload = buildBasePayload(kind);
   payload.settings.seed = seed;
+  const activeCloudProvider = activePromptAssistCloudProvider();
+  const activeVisionCloudProvider = activeVisionAssistCloudProvider();
 
   state.preparing = true;
   syncActionState();
-  setProgress(0.06, "Previewing", `Preparing a handoff preview for ${formatKind(kind).toLowerCase()} generation.`);
+  setProgress(
+    0.06,
+    "Previewing",
+    [
+      `Preparing a handoff preview for ${formatKind(kind).toLowerCase()} generation.`,
+      activeMediaCloudProvider
+        ? `Final ${formatKind(kind).toLowerCase()} output is routed through ${activeMediaCloudProvider.display_name}.`
+        : "",
+      activeCloudProvider
+        ? `Prompt Assist will use cloud provider ${activeCloudProvider.display_name} if compilation is needed.`
+        : "",
+      activeVisionCloudProvider && state.primaryReference?.kind === "image"
+        ? `Vision Assist will inspect the reference image through ${activeVisionCloudProvider.display_name} if image analysis is needed.`
+        : "",
+    ].filter(Boolean).join(" ")
+  );
 
   try {
     const response = await fetch("/api/prepare", {
@@ -3627,17 +4369,29 @@ async function prepareGenerationRequest() {
 
 async function submitGeneration(kind) {
   const model = getSelectedModel();
-  if (!model) {
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
+  if (!model && !activeMediaCloudProvider) {
     setProgress(0, "Model", `Choose a ${state.generationStyle} model first.`);
     return;
   }
 
-  if (!kindSupported(model, kind)) {
+  if (activeMediaCloudProvider && !mediaGenerationSupportedKinds(activeMediaCloudProvider).includes(kind)) {
+    setProgress(0, "Output Route", `${activeMediaCloudProvider.display_name} is not configured for cloud ${formatKind(kind).toLowerCase()} generation.`);
+    return;
+  }
+
+  if (!activeMediaCloudProvider && !kindSupported(model, kind)) {
     setProgress(0, "Mode", `${model.name} does not currently support ${kind} generation in ${state.generationStyle} mode.`);
     return;
   }
 
-  if (!areAssignedReferencesCompatible(model)) {
+  if (activeMediaCloudProvider && !areCloudMediaReferencesCompatible()) {
+    const message = cloudMediaReferenceValidationMessage();
+    setProgress(0, "Reference", message);
+    return;
+  }
+
+  if (!activeMediaCloudProvider && !areAssignedReferencesCompatible(model)) {
     const message = getAssignedReferenceValidationMessage(model);
     setProgress(0, "Reference", message);
     return;
@@ -3646,7 +4400,7 @@ async function submitGeneration(kind) {
   const prompt = elements.promptInput.value.trim();
   const audioLiteralPrompt = elements.audioLiteralPromptInput.value.trim();
   const batchCount = parseBatchCountInput();
-  const canUseAudioLiteral = model.backend === "audio_runtime" && kind === "audio";
+  const canUseAudioLiteral = kind === "audio" && (activeMediaCloudProvider || model?.backend === "audio_runtime");
   const audioSegments = canUseAudioLiteral && state.workflowMode === "advanced"
     ? getNormalizedAudioSegments()
     : [];
@@ -3656,7 +4410,7 @@ async function submitGeneration(kind) {
     return;
   }
 
-  const currentRisk = state.hardwareProfile
+  const currentRisk = !activeMediaCloudProvider && state.hardwareProfile
     ? assessCurrentKindPressure(model, kind, state.hardwareProfile)
     : null;
 
@@ -3666,7 +4420,9 @@ async function submitGeneration(kind) {
   setProgress(
     0.04,
     "Queued",
-    state.generationStyle === "realism"
+    activeMediaCloudProvider
+      ? `Submitting ${kind} job to cloud ${kind === "audio" ? "speech" : kind} generation via ${activeMediaCloudProvider.display_name}.`
+      : state.generationStyle === "realism"
       ? `Submitting ${kind} job to the local stable-diffusion.cpp realism backend.${currentRisk?.tone === "risky" ? ` Warning: ${currentRisk.note}` : ""}`
       : `Submitting ${kind} job to the bundled expressive backend.`
   );
@@ -3734,12 +4490,15 @@ async function cancelCurrentGeneration() {
     return;
   }
 
+  const activeMediaCloudProvider = activeMediaGenerationCloudProvider();
   state.canceling = true;
   syncActionState();
   setProgress(
     Math.max(0.05, Number(state.currentBatchCompleted || 0) / Math.max(1, Number(state.currentBatchTotal || 1))),
     "Canceling",
-    "Cancel requested. Chatty-art is stopping the current generation and any remaining queued batch items."
+    activeMediaCloudProvider
+      ? `Cancel requested. Chatty-art is stopping the current cloud run with ${activeMediaCloudProvider.display_name} and aborting any remaining queued batch items.`
+      : "Cancel requested. Chatty-art is stopping the current generation and any remaining queued batch items."
   );
 
   try {
@@ -3818,7 +4577,7 @@ function handleServerEvent(event) {
     state.currentBatchTotal = 1;
     state.currentBatchCompleted = 0;
     syncActionState();
-    setProgress(0, "Canceled", event.message || "Generation canceled.");
+    setProgress(0, "Canceled", formatGenerationFailureMessage(event.message || "Generation canceled.", { canceled: true }));
     return;
   }
 
@@ -3829,8 +4588,28 @@ function handleServerEvent(event) {
     state.currentBatchTotal = 1;
     state.currentBatchCompleted = 0;
     syncActionState();
-    setProgress(0, "Error", event.message || "Generation failed.");
+    setProgress(0, "Error", formatGenerationFailureMessage(event.message || "Generation failed."));
   }
+}
+
+function formatGenerationFailureMessage(message, { canceled = false } = {}) {
+  const text = String(message || "").trim();
+  if (!text) {
+    return canceled ? "Generation canceled." : "Generation failed.";
+  }
+  if (canceled) {
+    if (/cloud/i.test(text)) {
+      return `${text} The remote request was told to stop, and any remaining queued batch items were dropped.`;
+    }
+    return text;
+  }
+  if (/Cloud (image|speech) generation via /i.test(text)) {
+    return `${text} Check the saved API key, model name, provider status, and any temporary provider-side limits before retrying.`;
+  }
+  if (/timed out|timeout/i.test(text) && /cloud|provider|openai|gemini|anthropic/i.test(text)) {
+    return `${text} The provider took too long to answer. Retry in a moment, or verify the endpoint and model configuration.`;
+  }
+  return text;
 }
 
 function upsertOutput(output) {
@@ -3876,6 +4655,23 @@ function getPromptAssistModels() {
   );
 }
 
+function getPromptAssistCloudModels() {
+  return getPromptAssistEligibleProviders().map((provider) => ({
+    kind: "cloud",
+    id: `cloud:${provider.id}`,
+    providerId: provider.id,
+    providerKind: provider.provider_kind,
+    providerName: provider.display_name,
+    name: provider.prompt_assist_model_name,
+    modelName: provider.prompt_assist_model_name,
+    baseUrl: provider.base_url,
+    hasApiKey: provider.has_api_key,
+    enabled: provider.enabled !== false,
+    verification: provider.prompt_assist_verification || {},
+    capabilities: provider.capabilities || {},
+  }));
+}
+
 function getVisionAssistModels() {
   return state.models.filter((model) =>
     model.runtime_supported
@@ -3889,109 +4685,1246 @@ function getVisionAssistModels() {
   );
 }
 
+function getVisionAssistCloudModels() {
+  return getVisionAssistEligibleProviders().map((provider) => ({
+    kind: "cloud",
+    id: `cloud:${provider.id}`,
+    providerId: provider.id,
+    providerKind: provider.provider_kind,
+    providerName: provider.display_name,
+    name: provider.vision_model_name,
+    modelName: provider.vision_model_name,
+    baseUrl: provider.base_url,
+    hasApiKey: provider.has_api_key,
+    enabled: provider.enabled !== false,
+    verification: provider.vision_assist_verification || {},
+    capabilities: provider.capabilities || {},
+  }));
+}
+
 function shouldSurfaceVisionAssistModel(model) {
   const lower = (model?.name || "").toLowerCase();
   return lower.includes("qwen2.5-vl") || lower.includes("llava");
 }
 
+function hasVisionAssistImageReference() {
+  return Boolean(state.primaryReference && state.primaryReference.kind === "image");
+}
+
+function shouldShowVisionAssistControls() {
+  return elements.promptAssistInput.value !== "off";
+}
+
 function shouldShowVisionModelSelector() {
-  return elements.promptAssistInput.value !== "off"
-    && Boolean(state.primaryReference && state.primaryReference.kind === "image");
+  return shouldShowVisionAssistControls();
 }
 
 function shouldShowPromptModelSelector() {
   return Boolean(getSelectedModel());
 }
 
+function selectedPromptAssistLocalModelId() {
+  const value = elements.promptModelSelect.value || "";
+  return value && !value.startsWith("cloud:") ? value : null;
+}
+
+function selectedVisionAssistLocalModelId() {
+  const value = elements.visionModelSelect.value || "";
+  return value && !value.startsWith("cloud:") ? value : null;
+}
+
+function activePromptAssistCloudProvider() {
+  const selection = elements.promptAssistLaneSelect?.value
+    || state.cloudLaneAssignments?.prompt_assist
+    || "local_auto";
+  if (!selection.startsWith("cloud:")) {
+    return null;
+  }
+  const providerId = selection.slice("cloud:".length);
+  return getPromptAssistEligibleProviders().find((provider) => provider.id === providerId) || null;
+}
+
+function activeMediaGenerationCloudProvider() {
+  const selection = elements.mediaGenerationLaneSelect?.value
+    || state.cloudLaneAssignments?.media_generation
+    || "local_only";
+  if (!selection.startsWith("cloud:")) {
+    return null;
+  }
+  const providerId = selection.slice("cloud:".length);
+  return getMediaGenerationEligibleProviders().find((provider) => provider.id === providerId) || null;
+}
+
+function activeVisionAssistCloudProvider() {
+  const selection = elements.visionAssistLaneSelect?.value
+    || state.cloudLaneAssignments?.vision_assist
+    || "local_auto";
+  if (!selection.startsWith("cloud:")) {
+    return null;
+  }
+  const providerId = selection.slice("cloud:".length);
+  return getVisionAssistEligibleProviders().find((provider) => provider.id === providerId) || null;
+}
+
+function mediaGenerationSupportedKinds(provider) {
+  const kinds = [];
+  if (provider?.capabilities?.image_generation && String(provider.image_generation_model_name || "").trim()) {
+    kinds.push("image");
+  }
+  if (provider?.capabilities?.video_generation && String(provider.video_generation_model_name || "").trim()) {
+    kinds.push("video");
+  }
+  if (provider?.capabilities?.audio_generation && String(provider.audio_generation_model_name || "").trim()) {
+    kinds.push("audio");
+  }
+  return kinds;
+}
+
+function getMediaGenerationCloudModels() {
+  return getMediaGenerationEligibleProviders().map((provider) => ({
+    kind: "cloud",
+    id: `cloud:${provider.id}`,
+    providerId: provider.id,
+    providerKind: provider.provider_kind,
+    providerName: provider.display_name,
+    baseUrl: provider.base_url,
+    hasApiKey: provider.has_api_key,
+    enabled: provider.enabled !== false,
+    verification: provider.media_generation_verification || {},
+    capabilities: provider.capabilities || {},
+    supportedKinds: mediaGenerationSupportedKinds(provider),
+    imageModelName: provider.image_generation_model_name || "",
+    videoModelName: provider.video_generation_model_name || "",
+    audioModelName: provider.audio_generation_model_name || "",
+    audioVoice: provider.audio_generation_voice || "",
+  }));
+}
+
+function getMediaGenerationCloudRoutes(kind = null) {
+  const activeKind = kind || elements.prepareKindInput.value || "image";
+  return getMediaGenerationCloudModels()
+    .filter((provider) => (provider.supportedKinds || []).includes(activeKind))
+    .map((provider) => ({
+      kind: "cloud-route",
+      id: `cloud-route:${provider.providerId}:${activeKind}`,
+      laneSelection: `cloud:${provider.providerId}`,
+      outputKind: activeKind,
+      providerId: provider.providerId,
+      providerKind: provider.providerKind,
+      providerName: provider.providerName,
+      baseUrl: provider.baseUrl,
+      hasApiKey: provider.hasApiKey,
+      enabled: provider.enabled,
+      verification: provider.verification,
+      modelName:
+        activeKind === "image"
+          ? provider.imageModelName
+          : activeKind === "video"
+            ? provider.videoModelName
+            : provider.audioModelName,
+      audioVoice: activeKind === "audio" ? provider.audioVoice : "",
+      supportedKinds: provider.supportedKinds,
+    }));
+}
+
+function mediaGenerationLaneSelectionFromRouteValue(value) {
+  if (!String(value).startsWith("cloud-route:")) {
+    return null;
+  }
+  const parts = String(value).split(":");
+  return parts.length >= 3 ? `cloud:${parts[1]}` : null;
+}
+
+function activeMediaGenerationCloudRoute() {
+  const provider = activeMediaGenerationCloudProvider();
+  const kind = elements.prepareKindInput.value || "image";
+  if (!provider) {
+    return null;
+  }
+  return getMediaGenerationCloudRoutes(kind).find((route) => route.providerId === provider.id) || null;
+}
+
+function isGeminiCloudVideoProvider(provider) {
+  return provider?.provider_kind === "gemini" && mediaGenerationSupportedKinds(provider).includes("video");
+}
+
+function isOpenAiCloudVideoProvider(provider) {
+  return provider?.provider_kind === "open_ai" && mediaGenerationSupportedKinds(provider).includes("video");
+}
+
+function isOpenAiProVideoModel(provider) {
+  return String(provider?.video_generation_model_name || "").toLowerCase().includes("sora-2-pro");
+}
+
+function getPromptAssistEligibleProviders() {
+  return (state.cloudProviders || []).filter((provider) =>
+    provider.enabled
+    && provider.capabilities?.text_assist
+    && String(provider.prompt_assist_model_name || "").trim()
+  );
+}
+
+function getVisionAssistEligibleProviders() {
+  return (state.cloudProviders || []).filter((provider) =>
+    provider.enabled
+    && provider.capabilities?.vision_assist
+    && String(provider.vision_model_name || "").trim()
+  );
+}
+
+function getMediaGenerationEligibleProviders() {
+  return (state.cloudProviders || []).filter((provider) =>
+    provider.enabled
+    && mediaGenerationSupportedKinds(provider).length > 0
+  );
+}
+
+function mediaGenerationVideoRouteNote(provider) {
+  if (!provider?.video_generation_model_name) {
+    return "";
+  }
+  switch (provider.provider_kind) {
+    case "open_ai":
+      return " Cloud video on this lane currently uses a temporary deprecated video adapter and must be replaced before September 24, 2026.";
+    case "gemini":
+      return " Cloud video on this lane currently uses the provider family's compatible video bridge.";
+    default:
+      return "";
+  }
+}
+
+function providerKindLabel(providerKind) {
+  switch (providerKind) {
+    case "open_ai":
+      return "OpenAI";
+    case "open_ai_compatible":
+      return "OpenAI-compatible";
+    case "anthropic":
+      return "Anthropic";
+    case "gemini":
+      return "Gemini";
+    case "x_ai_grok":
+      return "xAI Grok";
+    case "deep_seek":
+      return "DeepSeek";
+    default:
+      return "This provider";
+  }
+}
+
+function unsupportedMediaProviderMessage(provider) {
+  switch (provider?.provider_kind) {
+    case "anthropic":
+      return "Anthropic is currently assist-only in Chatty-art. This saved account or route can still serve Prompt Assist or Vision Assist, but the cloud media lane is not wired for Anthropic yet.";
+    case "open_ai_compatible":
+      return "This generic OpenAI-compatible route currently covers Prompt Assist and Vision Assist only. Cloud media stays blocked here until a specific compatible-media adapter is wired.";
+    case "x_ai_grok":
+      return "xAI Grok is currently Prompt Assist-only in Chatty-art. Cloud media stays blocked here until a first-party media adapter exists.";
+    case "deep_seek":
+      return "DeepSeek is currently Prompt Assist-only in Chatty-art. Cloud media stays blocked here until a first-party media adapter exists.";
+    default:
+      return `${providerKindLabel(provider?.provider_kind)} is not wired for cloud media generation in Chatty-art yet.`;
+  }
+}
+
+function mediaRouteInventorySummary(provider) {
+  const routes = [];
+  if (String(provider?.image_generation_model_name || "").trim()) {
+    routes.push(`Image: ${provider.image_generation_model_name.trim()}`);
+  }
+  if (String(provider?.video_generation_model_name || "").trim()) {
+    routes.push(`Video: ${provider.video_generation_model_name.trim()}`);
+  }
+  if (String(provider?.audio_generation_model_name || "").trim()) {
+    const voiceNote = String(provider?.audio_generation_voice || "").trim();
+    routes.push(`Speech: ${provider.audio_generation_model_name.trim()}${voiceNote ? ` (voice ${voiceNote})` : ""}`);
+  }
+  return routes.length
+    ? `Configured routes: ${routes.join(" | ")}.`
+    : "No image, video, or speech route model is configured yet.";
+}
+
+function mediaEditorSelectionStatus(selectedProvider, laneProvider) {
+  if (!selectedProvider) {
+    return "";
+  }
+  if (!laneProvider) {
+    return "The active output lane is currently local.";
+  }
+  if (laneProvider.id === selectedProvider.id) {
+    return "This saved route is currently active on the output lane.";
+  }
+  return `Editing ${selectedProvider.display_name}. Active output lane: ${laneProvider.display_name}.`;
+}
+
+function unsupportedVisionProviderMessage(provider) {
+  if (provider?.provider_kind === "open_ai_compatible") {
+    return "This saved OpenAI-compatible route needs an image-capable endpoint plus a Vision Assist model name before it can appear on the Vision Assist lane.";
+  }
+  if (provider?.provider_kind === "x_ai_grok" || provider?.provider_kind === "deep_seek") {
+    return `${providerKindLabel(provider?.provider_kind)} is currently Prompt Assist-only in Chatty-art. Vision Assist is not wired for this family yet.`;
+  }
+  return `${providerKindLabel(provider?.provider_kind)} is not wired for Vision Assist in Chatty-art yet.`;
+}
+
+function cloudProviderDefaults(providerKind) {
+  switch (providerKind) {
+    case "open_ai":
+      return { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini", imageModel: "gpt-image-2", videoModel: "sora-2", audioModel: "gpt-4o-mini-tts", audioVoice: "marin" };
+    case "anthropic":
+      return { baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-5", imageModel: "", videoModel: "", audioModel: "", audioVoice: "" };
+    case "gemini":
+      return { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-3.5-flash", imageModel: "gemini-2.5-flash-image", videoModel: "veo-3.1-generate-preview", audioModel: "gemini-3.1-flash-tts-preview", audioVoice: "Kore" };
+    case "x_ai_grok":
+      return { baseUrl: "https://api.x.ai/v1", model: "grok-4-fast-reasoning", imageModel: "", videoModel: "", audioModel: "", audioVoice: "" };
+    case "deep_seek":
+      return { baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", imageModel: "", videoModel: "", audioModel: "", audioVoice: "" };
+    case "open_ai_compatible":
+      return { baseUrl: "", model: "", imageModel: "", videoModel: "", audioModel: "", audioVoice: "" };
+    default:
+      return { baseUrl: "", model: "", imageModel: "", videoModel: "", audioModel: "", audioVoice: "" };
+  }
+}
+
+function buildProviderOptions(providerKinds) {
+  return providerKinds
+    .map((providerKind) => `<option value="${escapeHtml(providerKind)}">${escapeHtml(providerKindLabel(providerKind))}</option>`)
+    .join("");
+}
+
+function promptAssistProviderKinds() {
+  return ["open_ai", "anthropic", "gemini", "x_ai_grok", "deep_seek", "open_ai_compatible"];
+}
+
+function mediaGenerationProviderKinds() {
+  return ["open_ai", "gemini"];
+}
+
+function visionAssistProviderKinds() {
+  return ["open_ai", "anthropic", "gemini", "open_ai_compatible"];
+}
+
+function getSelectedPromptAssistCloudProvider() {
+  const id = elements.promptAssistCloudEntrySelect.value;
+  return state.cloudProviders.find((provider) => provider.id === id) || null;
+}
+
+function renderPromptAssistProviderInventory() {
+  const current = elements.promptAssistCloudProviderInput.value;
+  const providerKinds = promptAssistProviderKinds();
+  elements.promptAssistCloudProviderInput.innerHTML = buildProviderOptions(providerKinds);
+  if (providerKinds.includes(current)) {
+    elements.promptAssistCloudProviderInput.value = current;
+  } else if (providerKinds.length) {
+    elements.promptAssistCloudProviderInput.value = providerKinds[0];
+  }
+}
+
+function populatePromptAssistCloudForm() {
+  const provider = getSelectedPromptAssistCloudProvider();
+  if (!provider) {
+    const defaults = cloudProviderDefaults(elements.promptAssistCloudProviderInput.value);
+    elements.promptAssistCloudNameInput.value = "";
+    elements.promptAssistCloudBaseUrlInput.value = defaults.baseUrl;
+    elements.promptAssistCloudModelInput.value = defaults.model;
+    elements.promptAssistCloudApiKeyInput.value = "";
+    elements.promptAssistCloudEnabledInput.checked = true;
+    return;
+  }
+
+  elements.promptAssistCloudNameInput.value = provider.display_name || "";
+  elements.promptAssistCloudProviderInput.value = provider.provider_kind || "open_ai_compatible";
+  elements.promptAssistCloudBaseUrlInput.value = provider.base_url || "";
+  elements.promptAssistCloudModelInput.value = provider.prompt_assist_model_name || "";
+  elements.promptAssistCloudApiKeyInput.value = "";
+  elements.promptAssistCloudEnabledInput.checked = provider.enabled !== false;
+}
+
+function renderPromptAssistCloudControls() {
+  renderPromptAssistProviderInventory();
+  const providers = state.cloudProviders || [];
+  const laneProviders = getPromptAssistEligibleProviders();
+  const laneSelection = state.cloudLaneAssignments?.prompt_assist || "local_auto";
+  const previousSelection = elements.promptAssistCloudEntrySelect.value;
+  const laneOptions = [
+    `<option value="local_auto">Local Auto (Default)</option>`,
+    ...laneProviders
+      .map((provider) => `<option value="cloud:${escapeHtml(provider.id)}">Cloud Route: ${escapeHtml(provider.display_name)}</option>`),
+  ];
+  elements.promptAssistLaneSelect.innerHTML = laneOptions.join("");
+  elements.promptAssistLaneSelect.value = laneOptions.some((option) => option.includes(`value="${laneSelection}"`))
+    ? laneSelection
+    : "local_auto";
+
+  elements.promptAssistCloudEntrySelect.innerHTML = [
+    `<option value="">New Account / Route</option>`,
+    ...providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.display_name)}${provider.enabled === false ? " (disabled)" : ""}</option>`),
+  ].join("");
+
+  if (providers.some((provider) => provider.id === previousSelection)) {
+    elements.promptAssistCloudEntrySelect.value = previousSelection;
+  } else if (laneSelection.startsWith("cloud:")) {
+    elements.promptAssistCloudEntrySelect.value = laneSelection.slice("cloud:".length);
+  } else {
+    elements.promptAssistCloudEntrySelect.value = "";
+  }
+
+  populatePromptAssistCloudForm();
+
+  const selectedProvider = getSelectedPromptAssistCloudProvider();
+  const laneProvider = activePromptAssistCloudProvider();
+  const usingCloud = elements.promptAssistLaneSelect.value.startsWith("cloud:");
+  if (usingCloud && laneProvider) {
+    elements.promptAssistLaneSummary.textContent = `Prompt Assist will use ${laneProvider.prompt_assist_model_name} on ${providerKindLabel(laneProvider.provider_kind)} / ${laneProvider.display_name}. Prompt text leaves this machine for prompt expansion on that lane only; Vision Assist and final media generation stay on their own explicitly chosen lanes.`;
+  } else {
+    elements.promptAssistLaneSummary.textContent = "Prompt Assist stays local by default. Nothing is uploaded unless you explicitly switch this lane to a cloud provider.";
+  }
+
+  if (!selectedProvider) {
+    elements.promptAssistCloudStatus.textContent = providers.length
+      ? "Choose a saved cloud account to edit it, or leave this on New Account / Route to create another one."
+      : "No saved Prompt Assist cloud account or route yet.";
+  } else {
+    const verification = selectedProvider.prompt_assist_verification || {};
+    const status = verification.status ? verification.status : "Not verified yet.";
+    const keyNote = selectedProvider.has_api_key ? "API key saved." : "No API key saved.";
+    const enabledNote = selectedProvider.enabled === false
+      ? "Disabled. This saved account or route stays editable but will not appear in the Prompt Assist lane selector until you re-enable it."
+      : "Enabled for lane selection.";
+    elements.promptAssistCloudStatus.textContent = `${keyNote} ${enabledNote} ${status}`;
+  }
+
+  elements.verifyPromptAssistCloudButton.disabled = !selectedProvider;
+  elements.deletePromptAssistCloudButton.disabled = !selectedProvider;
+}
+
+function getSelectedMediaGenerationCloudProvider() {
+  const id = elements.mediaGenerationCloudEntrySelect.value;
+  return state.cloudProviders.find((provider) => provider.id === id) || null;
+}
+
+function renderMediaGenerationProviderInventory() {
+  const current = elements.mediaGenerationCloudProviderInput.value;
+  const providerKinds = mediaGenerationProviderKinds();
+  elements.mediaGenerationCloudProviderInput.innerHTML = buildProviderOptions(providerKinds);
+  if (providerKinds.includes(current)) {
+    elements.mediaGenerationCloudProviderInput.value = current;
+  } else if (providerKinds.length) {
+    elements.mediaGenerationCloudProviderInput.value = providerKinds[0];
+  }
+}
+
+function populateMediaGenerationCloudForm() {
+  const provider = getSelectedMediaGenerationCloudProvider();
+  if (!provider) {
+    const defaults = cloudProviderDefaults(elements.mediaGenerationCloudProviderInput.value);
+    elements.mediaGenerationCloudNameInput.value = "";
+    elements.mediaGenerationCloudBaseUrlInput.value = defaults.baseUrl;
+    elements.mediaGenerationCloudImageModelInput.value = defaults.imageModel || defaults.model;
+    elements.mediaGenerationCloudVideoModelInput.value = defaults.videoModel || "";
+    elements.mediaGenerationCloudAudioModelInput.value = defaults.audioModel || "";
+    elements.mediaGenerationCloudVoiceInput.value = defaults.audioVoice || "";
+    elements.mediaGenerationCloudApiKeyInput.value = "";
+    elements.mediaGenerationCloudEnabledInput.checked = true;
+    return;
+  }
+
+  elements.mediaGenerationCloudNameInput.value = provider.display_name || "";
+  elements.mediaGenerationCloudProviderInput.value = provider.provider_kind || "open_ai_compatible";
+  elements.mediaGenerationCloudBaseUrlInput.value = provider.base_url || "";
+  elements.mediaGenerationCloudImageModelInput.value = provider.image_generation_model_name || "";
+  elements.mediaGenerationCloudVideoModelInput.value = provider.video_generation_model_name || "";
+  elements.mediaGenerationCloudAudioModelInput.value = provider.audio_generation_model_name || "";
+  elements.mediaGenerationCloudVoiceInput.value = provider.audio_generation_voice || "";
+  elements.mediaGenerationCloudApiKeyInput.value = "";
+  elements.mediaGenerationCloudEnabledInput.checked = provider.enabled !== false;
+}
+
+function renderMediaGenerationCloudControls() {
+  renderMediaGenerationProviderInventory();
+  const providers = (state.cloudProviders || []).filter((provider) =>
+    mediaGenerationProviderKinds().includes(provider.provider_kind)
+  );
+  const laneProviders = getMediaGenerationEligibleProviders();
+  const laneSelection = state.cloudLaneAssignments?.media_generation || "local_only";
+  const previousSelection = elements.mediaGenerationCloudEntrySelect.value;
+  const laneOptions = [
+    `<option value="local_only">Local Only (Default)</option>`,
+    ...laneProviders
+      .map((provider) => `<option value="cloud:${escapeHtml(provider.id)}">Cloud Route: ${escapeHtml(provider.display_name)}</option>`),
+  ];
+  elements.mediaGenerationLaneSelect.innerHTML = laneOptions.join("");
+  elements.mediaGenerationLaneSelect.value = laneOptions.some((option) => option.includes(`value="${laneSelection}"`))
+    ? laneSelection
+    : "local_only";
+
+  elements.mediaGenerationCloudEntrySelect.innerHTML = [
+    `<option value="">New Account / Route</option>`,
+    ...providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.display_name)}${provider.enabled === false ? " (disabled)" : ""}</option>`),
+  ].join("");
+
+  if (providers.some((provider) => provider.id === previousSelection)) {
+    elements.mediaGenerationCloudEntrySelect.value = previousSelection;
+  } else if (laneSelection.startsWith("cloud:")) {
+    elements.mediaGenerationCloudEntrySelect.value = laneSelection.slice("cloud:".length);
+  } else {
+    elements.mediaGenerationCloudEntrySelect.value = "";
+  }
+
+  populateMediaGenerationCloudForm();
+
+  const selectedProvider = getSelectedMediaGenerationCloudProvider();
+  const laneProvider = activeMediaGenerationCloudProvider();
+  const usingCloud = elements.mediaGenerationLaneSelect.value.startsWith("cloud:");
+  if (usingCloud && laneProvider) {
+    const kinds = mediaGenerationSupportedKinds(laneProvider).map((kind) => formatKind(kind).toLowerCase());
+    const videoNote = mediaGenerationVideoRouteNote(laneProvider);
+    const voiceNote = laneProvider.audio_generation_model_name
+      ? laneProvider.audio_generation_voice
+        ? ` Cloud speech currently uses the provider-specific voice id '${laneProvider.audio_generation_voice}'.`
+        : " Cloud speech will use the provider's default voice unless you save a specific voice or speaker id."
+      : "";
+    elements.mediaGenerationLaneSummary.textContent = `Final ${kinds.join(" + ")} output can be generated through ${laneProvider.display_name}. This is a remote output lane, not the same runtime as local generation. Prompts and any supported references only leave the machine when you explicitly keep this cloud lane selected.${videoNote}${voiceNote}`;
+  } else {
+    elements.mediaGenerationLaneSummary.textContent = "Local generation is still the default first-run path. Cloud output is opt-in only and remains separate from the local runtimes.";
+  }
+
+  if (!selectedProvider) {
+    elements.mediaGenerationCloudStatus.textContent = providers.length
+      ? "Choose a saved cloud account or route to edit credentials and route declarations, or leave this on New Account / Route to create another one."
+      : "No saved cloud media account or route yet.";
+  } else {
+    const keyNote = selectedProvider.has_api_key ? "API key saved." : "No API key saved.";
+    const enabledNote = selectedProvider.enabled === false
+      ? "Disabled. This saved account or route stays editable but will not appear in the cloud media lane selector until you re-enable it."
+      : "Enabled for lane selection.";
+    const selectionNote = mediaEditorSelectionStatus(selectedProvider, laneProvider);
+    const routeNote = mediaRouteInventorySummary(selectedProvider);
+    const kinds = mediaGenerationSupportedKinds(selectedProvider);
+    if (!kinds.length) {
+      elements.mediaGenerationCloudStatus.textContent = `${keyNote} ${enabledNote} ${selectionNote} ${routeNote} ${unsupportedMediaProviderMessage(selectedProvider)}`;
+    } else {
+      const verification = selectedProvider.media_generation_verification || {};
+      const status = verification.status ? verification.status : "Not verified yet.";
+      elements.mediaGenerationCloudStatus.textContent = `${keyNote} ${enabledNote} ${selectionNote} ${routeNote} ${status}`;
+    }
+  }
+
+  elements.verifyMediaGenerationCloudButton.disabled = !selectedProvider || !mediaGenerationSupportedKinds(selectedProvider).length;
+  elements.deleteMediaGenerationCloudButton.disabled = !selectedProvider;
+}
+
+function getSelectedVisionAssistCloudProvider() {
+  const id = elements.visionAssistCloudEntrySelect.value;
+  return state.cloudProviders.find((provider) => provider.id === id) || null;
+}
+
+function renderVisionAssistProviderInventory() {
+  const current = elements.visionAssistCloudProviderInput.value;
+  const providerKinds = visionAssistProviderKinds();
+  elements.visionAssistCloudProviderInput.innerHTML = buildProviderOptions(providerKinds);
+  if (providerKinds.includes(current)) {
+    elements.visionAssistCloudProviderInput.value = current;
+  } else if (providerKinds.length) {
+    elements.visionAssistCloudProviderInput.value = providerKinds[0];
+  }
+}
+
+function populateVisionAssistCloudForm() {
+  const provider = getSelectedVisionAssistCloudProvider();
+  if (!provider) {
+    const defaults = cloudProviderDefaults(elements.visionAssistCloudProviderInput.value);
+    elements.visionAssistCloudNameInput.value = "";
+    elements.visionAssistCloudBaseUrlInput.value = defaults.baseUrl;
+    elements.visionAssistCloudModelInput.value = defaults.model;
+    elements.visionAssistCloudApiKeyInput.value = "";
+    elements.visionAssistCloudEnabledInput.checked = true;
+    return;
+  }
+
+  elements.visionAssistCloudNameInput.value = provider.display_name || "";
+  elements.visionAssistCloudProviderInput.value = provider.provider_kind || "open_ai_compatible";
+  elements.visionAssistCloudBaseUrlInput.value = provider.base_url || "";
+  elements.visionAssistCloudModelInput.value = provider.vision_model_name || "";
+  elements.visionAssistCloudApiKeyInput.value = "";
+  elements.visionAssistCloudEnabledInput.checked = provider.enabled !== false;
+}
+
+function renderVisionAssistCloudControls() {
+  renderVisionAssistProviderInventory();
+  const shouldShow = shouldShowVisionAssistControls();
+  const hasImageReference = hasVisionAssistImageReference();
+  elements.visionAssistCloudBlock.classList.toggle("hidden", !shouldShow);
+  if (!shouldShow) {
+    return;
+  }
+
+  const providers = (state.cloudProviders || []).filter((provider) =>
+    visionAssistProviderKinds().includes(provider.provider_kind)
+  );
+  const laneProviders = getVisionAssistEligibleProviders();
+  const laneSelection = state.cloudLaneAssignments?.vision_assist || "local_auto";
+  const previousSelection = elements.visionAssistCloudEntrySelect.value;
+  const laneOptions = [
+    `<option value="local_auto">Local Auto (Default)</option>`,
+    ...laneProviders
+      .map((provider) => `<option value="cloud:${escapeHtml(provider.id)}">Cloud Route: ${escapeHtml(provider.display_name)}</option>`),
+  ];
+  elements.visionAssistLaneSelect.innerHTML = laneOptions.join("");
+  elements.visionAssistLaneSelect.value = laneOptions.some((option) => option.includes(`value="${laneSelection}"`))
+    ? laneSelection
+    : "local_auto";
+  elements.visionAssistLaneSelect.disabled = !hasImageReference;
+
+  elements.visionAssistCloudEntrySelect.innerHTML = [
+    `<option value="">New Account / Route</option>`,
+    ...providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.display_name)}${provider.enabled === false ? " (disabled)" : ""}</option>`),
+  ].join("");
+
+  if (providers.some((provider) => provider.id === previousSelection)) {
+    elements.visionAssistCloudEntrySelect.value = previousSelection;
+  } else if (laneSelection.startsWith("cloud:")) {
+    elements.visionAssistCloudEntrySelect.value = laneSelection.slice("cloud:".length);
+  } else {
+    elements.visionAssistCloudEntrySelect.value = "";
+  }
+
+  populateVisionAssistCloudForm();
+
+  const selectedProvider = getSelectedVisionAssistCloudProvider();
+  const laneProvider = activeVisionAssistCloudProvider();
+  const usingCloud = elements.visionAssistLaneSelect.value.startsWith("cloud:");
+  if (!hasImageReference) {
+    elements.visionAssistLaneSummary.textContent = "Vision Assist becomes active only after you assign a still image as the primary reference. You can save or preselect local/cloud Vision Assist now, but no image analysis runs until that reference is in place.";
+  } else if (usingCloud && laneProvider) {
+    elements.visionAssistLaneSummary.textContent = `Vision Assist will inspect reference images with ${laneProvider.vision_model_name} on ${providerKindLabel(laneProvider.provider_kind)} / ${laneProvider.display_name}. That means the selected image may leave this machine on this lane; Prompt Assist and final generation can still stay local or use their own separate cloud lanes.`;
+  } else {
+    elements.visionAssistLaneSummary.textContent = "Vision Assist stays local by default. No reference image is uploaded unless you explicitly switch this lane to a cloud provider.";
+  }
+
+  if (!selectedProvider) {
+    elements.visionAssistCloudStatus.textContent = providers.length
+      ? "Choose a saved cloud account to edit it, or leave this on New Account / Route to create another one."
+      : "No saved Vision Assist cloud account or route yet.";
+  } else {
+    const keyNote = selectedProvider.has_api_key ? "API key saved." : "No API key saved.";
+    const enabledNote = selectedProvider.enabled === false
+      ? "Disabled. This saved account or route stays editable but will not appear in the Vision Assist lane selector until you re-enable it."
+      : "Enabled for lane selection.";
+    if (!selectedProvider.capabilities?.vision_assist || !String(selectedProvider.vision_model_name || "").trim()) {
+      elements.visionAssistCloudStatus.textContent = `${keyNote} ${enabledNote} ${unsupportedVisionProviderMessage(selectedProvider)}`;
+    } else {
+      const verification = selectedProvider.vision_assist_verification || {};
+      const status = verification.status ? verification.status : "Not verified yet.";
+      elements.visionAssistCloudStatus.textContent = `${keyNote} ${enabledNote} ${status}`;
+    }
+  }
+
+  elements.verifyVisionAssistCloudButton.disabled = !selectedProvider || !selectedProvider.capabilities?.vision_assist || !String(selectedProvider.vision_model_name || "").trim();
+  elements.deleteVisionAssistCloudButton.disabled = !selectedProvider;
+}
+
+async function savePromptAssistLaneSelection() {
+  try {
+    const response = await postJson("/api/cloud/lanes", {
+      lane_assignments: {
+        ...state.cloudLaneAssignments,
+        prompt_assist: elements.promptAssistLaneSelect.value,
+      },
+    });
+    state.cloudLaneAssignments = response.lane_assignments || state.cloudLaneAssignments;
+    clearPreparedHandoff();
+    renderPromptAssistCloudControls();
+    renderPromptModelSelector();
+    setProgress(0.02, "Prompt Assist", "Saved Prompt Assist lane selection.");
+  } catch (error) {
+    setProgress(0, "Cloud Lane", error.message || "Could not save Prompt Assist lane selection.");
+    renderPromptAssistCloudControls();
+  }
+}
+
+async function saveMediaGenerationLaneSelection() {
+  try {
+    const response = await postJson("/api/cloud/lanes", {
+      lane_assignments: {
+        ...state.cloudLaneAssignments,
+        media_generation: elements.mediaGenerationLaneSelect.value,
+      },
+    });
+    state.cloudLaneAssignments = response.lane_assignments || state.cloudLaneAssignments;
+    clearPreparedHandoff();
+    renderMediaGenerationCloudControls();
+    renderModels();
+    renderPrepareKindOptions();
+    setProgress(0.02, "Output Route", "Saved media generation route.");
+  } catch (error) {
+    setProgress(0, "Cloud Lane", error.message || "Could not save media generation route.");
+    renderMediaGenerationCloudControls();
+  }
+}
+
+async function saveMediaGenerationCloudProvider() {
+  try {
+    const existing = getSelectedMediaGenerationCloudProvider();
+    const nextProviderKind = elements.mediaGenerationCloudProviderInput.value;
+    const providerKindChanged = existing && existing.provider_kind !== nextProviderKind;
+    if (providerKindChanged && !elements.mediaGenerationCloudApiKeyInput.value.trim()) {
+      throw new Error("Paste a new API key before switching this saved account or route to a different provider family.");
+    }
+    const payload = {
+      id: existing ? existing.id : null,
+      display_name: elements.mediaGenerationCloudNameInput.value.trim(),
+      provider_kind: nextProviderKind,
+      base_url: elements.mediaGenerationCloudBaseUrlInput.value.trim(),
+      prompt_assist_model_name: providerKindChanged ? "" : existing?.prompt_assist_model_name || "",
+      vision_model_name: providerKindChanged ? "" : existing?.vision_model_name || "",
+      image_generation_model_name: elements.mediaGenerationCloudImageModelInput.value.trim(),
+      video_generation_model_name: elements.mediaGenerationCloudVideoModelInput.value.trim(),
+      audio_generation_model_name: elements.mediaGenerationCloudAudioModelInput.value.trim(),
+      audio_generation_voice: elements.mediaGenerationCloudVoiceInput.value.trim(),
+      enabled: elements.mediaGenerationCloudEnabledInput.checked,
+      api_key: elements.mediaGenerationCloudApiKeyInput.value.trim() || null,
+    };
+    await postJson("/api/cloud/providers", payload);
+    elements.mediaGenerationCloudApiKeyInput.value = "";
+    await Promise.all([loadCloudProviders(), loadCloudLaneAssignments()]);
+    clearPreparedHandoff();
+    renderMediaGenerationCloudControls();
+    renderModels();
+    renderPrepareKindOptions();
+    setProgress(0.02, "Cloud Route", "Saved cloud media account / route.");
+  } catch (error) {
+    setProgress(0, "Cloud Route", error.message || "Could not save the cloud account or route.");
+  }
+}
+
+async function savePromptAssistCloudProvider() {
+  try {
+    const existing = getSelectedPromptAssistCloudProvider();
+    const nextProviderKind = elements.promptAssistCloudProviderInput.value;
+    const providerKindChanged = existing && existing.provider_kind !== nextProviderKind;
+    if (providerKindChanged && !elements.promptAssistCloudApiKeyInput.value.trim()) {
+      throw new Error("Paste a new API key before switching this saved account or route to a different provider family.");
+    }
+    const payload = {
+      id: existing ? existing.id : null,
+      display_name: elements.promptAssistCloudNameInput.value.trim(),
+      provider_kind: nextProviderKind,
+      base_url: elements.promptAssistCloudBaseUrlInput.value.trim(),
+      prompt_assist_model_name: elements.promptAssistCloudModelInput.value.trim(),
+      vision_model_name: providerKindChanged ? "" : existing?.vision_model_name || "",
+      image_generation_model_name: providerKindChanged ? "" : existing?.image_generation_model_name || "",
+      video_generation_model_name: providerKindChanged ? "" : existing?.video_generation_model_name || "",
+      audio_generation_model_name: providerKindChanged ? "" : existing?.audio_generation_model_name || "",
+      audio_generation_voice: providerKindChanged ? "" : existing?.audio_generation_voice || "",
+      enabled: elements.promptAssistCloudEnabledInput.checked,
+      api_key: elements.promptAssistCloudApiKeyInput.value.trim() || null,
+    };
+    await postJson("/api/cloud/providers", payload);
+    elements.promptAssistCloudApiKeyInput.value = "";
+    await Promise.all([loadCloudProviders(), loadCloudLaneAssignments()]);
+    clearPreparedHandoff();
+    renderPromptModelSelector();
+    setProgress(0.02, "Cloud Provider", "Saved Prompt Assist cloud provider.");
+  } catch (error) {
+    setProgress(0, "Cloud Route", error.message || "Could not save the cloud account or route.");
+  }
+}
+
+async function saveVisionAssistLaneSelection() {
+  try {
+    const response = await postJson("/api/cloud/lanes", {
+      lane_assignments: {
+        ...state.cloudLaneAssignments,
+        vision_assist: elements.visionAssistLaneSelect.value,
+      },
+    });
+    state.cloudLaneAssignments = response.lane_assignments || state.cloudLaneAssignments;
+    clearPreparedHandoff();
+    renderVisionAssistCloudControls();
+    renderVisionModelSelector();
+    setProgress(0.02, "Vision Assist", "Saved Vision Assist lane selection.");
+  } catch (error) {
+    setProgress(0, "Cloud Lane", error.message || "Could not save Vision Assist lane selection.");
+    renderVisionAssistCloudControls();
+  }
+}
+
+async function saveVisionAssistCloudProvider() {
+  try {
+    const existing = getSelectedVisionAssistCloudProvider();
+    const nextProviderKind = elements.visionAssistCloudProviderInput.value;
+    const providerKindChanged = existing && existing.provider_kind !== nextProviderKind;
+    if (providerKindChanged && !elements.visionAssistCloudApiKeyInput.value.trim()) {
+      throw new Error("Paste a new API key before switching this saved account or route to a different provider family.");
+    }
+    const payload = {
+      id: existing ? existing.id : null,
+      display_name: elements.visionAssistCloudNameInput.value.trim(),
+      provider_kind: nextProviderKind,
+      base_url: elements.visionAssistCloudBaseUrlInput.value.trim(),
+      prompt_assist_model_name: providerKindChanged ? "" : existing?.prompt_assist_model_name || "",
+      vision_model_name: elements.visionAssistCloudModelInput.value.trim(),
+      image_generation_model_name: providerKindChanged ? "" : existing?.image_generation_model_name || "",
+      video_generation_model_name: providerKindChanged ? "" : existing?.video_generation_model_name || "",
+      audio_generation_model_name: providerKindChanged ? "" : existing?.audio_generation_model_name || "",
+      audio_generation_voice: providerKindChanged ? "" : existing?.audio_generation_voice || "",
+      enabled: elements.visionAssistCloudEnabledInput.checked,
+      api_key: elements.visionAssistCloudApiKeyInput.value.trim() || null,
+    };
+    await postJson("/api/cloud/providers", payload);
+    elements.visionAssistCloudApiKeyInput.value = "";
+    await Promise.all([loadCloudProviders(), loadCloudLaneAssignments()]);
+    clearPreparedHandoff();
+    renderVisionAssistCloudControls();
+    renderVisionModelSelector();
+    setProgress(0.02, "Cloud Provider", "Saved Vision Assist cloud provider.");
+  } catch (error) {
+    setProgress(0, "Cloud Route", error.message || "Could not save the cloud account or route.");
+  }
+}
+
+async function verifyPromptAssistCloudProvider() {
+  const provider = getSelectedPromptAssistCloudProvider();
+  if (!provider) {
+    setProgress(0, "Cloud Verify", "Choose a saved cloud account or route first.");
+    return;
+  }
+  try {
+    const response = await postJson("/api/cloud/providers/verify", {
+      id: provider.id,
+      lane: "prompt_assist",
+    });
+    await loadCloudProviders();
+    renderPromptAssistCloudControls();
+    renderPromptModelSelector();
+    setProgress(0.02, "Cloud Verify", response.note || `Verified ${provider.display_name}.`);
+  } catch (error) {
+    setProgress(0, "Cloud Verify", error.message || "Cloud route verification failed.");
+  }
+}
+
+async function deletePromptAssistCloudProvider() {
+  const provider = getSelectedPromptAssistCloudProvider();
+  if (!provider) {
+    setProgress(0, "Cloud Delete", "Choose a saved cloud account or route first.");
+    return;
+  }
+  try {
+    await postJson("/api/cloud/providers/delete", { id: provider.id });
+    await Promise.all([loadCloudProviders(), loadCloudLaneAssignments()]);
+    clearPreparedHandoff();
+    renderPromptModelSelector();
+    setProgress(0.02, "Cloud Delete", `Deleted ${provider.display_name}.`);
+  } catch (error) {
+    setProgress(0, "Cloud Delete", error.message || "Could not delete the saved cloud account or route.");
+  }
+}
+
+async function verifyMediaGenerationCloudProvider() {
+  const provider = getSelectedMediaGenerationCloudProvider();
+  if (!provider) {
+    setProgress(0, "Cloud Verify", "Choose a saved cloud account or route first.");
+    return;
+  }
+  try {
+    const response = await postJson("/api/cloud/providers/verify", {
+      id: provider.id,
+      lane: "media_generation",
+    });
+    await loadCloudProviders();
+    renderMediaGenerationCloudControls();
+    renderModels();
+    setProgress(0.02, "Cloud Verify", response.note || `Verified ${provider.display_name}.`);
+  } catch (error) {
+    setProgress(0, "Cloud Verify", error.message || "Cloud route verification failed.");
+  }
+}
+
+async function deleteMediaGenerationCloudProvider() {
+  const provider = getSelectedMediaGenerationCloudProvider();
+  if (!provider) {
+    setProgress(0, "Cloud Delete", "Choose a saved cloud account or route first.");
+    return;
+  }
+  try {
+    await postJson("/api/cloud/providers/delete", { id: provider.id });
+    await Promise.all([loadCloudProviders(), loadCloudLaneAssignments()]);
+    clearPreparedHandoff();
+    renderMediaGenerationCloudControls();
+    renderModels();
+    setProgress(0.02, "Cloud Delete", `Deleted ${provider.display_name}.`);
+  } catch (error) {
+    setProgress(0, "Cloud Delete", error.message || "Could not delete the saved cloud account or route.");
+  }
+}
+
+async function verifyVisionAssistCloudProvider() {
+  const provider = getSelectedVisionAssistCloudProvider();
+  if (!provider) {
+    setProgress(0, "Cloud Verify", "Choose a saved cloud account or route first.");
+    return;
+  }
+  try {
+    const response = await postJson("/api/cloud/providers/verify", {
+      id: provider.id,
+      lane: "vision_assist",
+    });
+    await loadCloudProviders();
+    renderVisionAssistCloudControls();
+    renderVisionModelSelector();
+    setProgress(0.02, "Cloud Verify", response.note || `Verified ${provider.display_name}.`);
+  } catch (error) {
+    setProgress(0, "Cloud Verify", error.message || "Cloud route verification failed.");
+  }
+}
+
+async function deleteVisionAssistCloudProvider() {
+  const provider = getSelectedVisionAssistCloudProvider();
+  if (!provider) {
+    setProgress(0, "Cloud Delete", "Choose a saved cloud account or route first.");
+    return;
+  }
+  try {
+    await postJson("/api/cloud/providers/delete", { id: provider.id });
+    await Promise.all([loadCloudProviders(), loadCloudLaneAssignments()]);
+    clearPreparedHandoff();
+    renderVisionAssistCloudControls();
+    renderVisionModelSelector();
+    setProgress(0.02, "Cloud Delete", `Deleted ${provider.display_name}.`);
+  } catch (error) {
+    setProgress(0, "Cloud Delete", error.message || "Could not delete the saved cloud account or route.");
+  }
+}
+
 function renderPromptModelSelector() {
   const shouldShow = shouldShowPromptModelSelector();
   elements.promptModelBlock.classList.remove("hidden");
+  const activeCloudProvider = activePromptAssistCloudProvider();
 
   if (!shouldShow) {
     elements.promptModelSelect.innerHTML = `<option value="">Auto (Recommended)</option>`;
     elements.promptModelSelect.disabled = true;
-    elements.promptModelSummary.textContent = "Pick a generation model first to unlock Prompt Assist model selection. Auto keeps Prompt Assist on the safer text-only route by default, while advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.";
+    elements.promptModelSummary.innerHTML = buildPromptAssistMessageCard("Pick a generation model first to unlock Prompt Assist model selection. Auto keeps Prompt Assist on the safer text-only route by default, while advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.");
     return;
   }
 
   const promptAssistEnabled = elements.promptAssistInput.value !== "off";
   const selected = elements.promptModelSelect.value;
   const promptModels = getPromptAssistModels();
+  const cloudModels = getPromptAssistCloudModels();
 
-  if (!promptModels.length) {
-    elements.promptModelSelect.innerHTML = `<option value="">No local Prompt Assist models found</option>`;
+  if (!promptModels.length && !cloudModels.length) {
+    elements.promptModelSelect.innerHTML = `<option value="">No Prompt Assist models found</option>`;
     elements.promptModelSelect.disabled = true;
-    elements.promptModelSummary.textContent = promptAssistEnabled
-      ? "Prompt Assist needs at least one local expressive llama.cpp model in models/. Auto prefers plain text helpers, but you can pin multimodal expressive models here when you deliberately want them doing both jobs."
-      : "Turn Prompt Assist on to use this selector. When enabled, Chatty-art prefers plain text helpers by default, but you can pin multimodal expressive models here when you deliberately want them doing both jobs.";
+    elements.promptModelSummary.innerHTML = buildPromptAssistMessageCard(
+      promptAssistEnabled
+        ? activeCloudProvider
+          ? `Prompt Assist is routed through ${activeCloudProvider.prompt_assist_model_name} on ${providerKindLabel(activeCloudProvider.provider_kind)} / ${activeCloudProvider.display_name}. Local helper discovery is currently empty, but cloud prompt expansion is available as a separate remote lane.`
+          : "Prompt Assist needs at least one local expressive llama.cpp model in models/. Auto prefers plain text helpers, but you can pin multimodal expressive models here when you deliberately want them doing both jobs."
+        : "Turn Prompt Assist on to use this selector. When enabled, Chatty-art prefers plain text helpers by default, but you can pin multimodal expressive models here when you deliberately want them doing both jobs."
+    );
     return;
   }
 
   elements.promptModelSelect.disabled = false;
-  elements.promptModelSelect.innerHTML = [
-    `<option value="">Auto (Recommended)</option>`,
-    ...promptModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildDropdownLabel(model))}</option>`),
-  ].join("");
+  elements.promptModelSelect.innerHTML = buildPromptAssistSelectorOptions(promptModels, cloudModels);
 
-  if (promptModels.some((model) => model.id === selected)) {
+  const activeCloudValue = activeCloudProvider ? `cloud:${activeCloudProvider.id}` : "";
+  if (selected && (promptModels.some((model) => model.id === selected) || cloudModels.some((model) => model.id === selected))) {
     elements.promptModelSelect.value = selected;
+  } else if (activeCloudValue && cloudModels.some((model) => model.id === activeCloudValue)) {
+    elements.promptModelSelect.value = activeCloudValue;
   } else {
     elements.promptModelSelect.value = "";
   }
 
   const chosen = promptModels.find((model) => model.id === elements.promptModelSelect.value) || null;
+  const chosenCloud = cloudModels.find((model) => model.id === elements.promptModelSelect.value) || null;
   const multimodal = chosen && chosen.supports_image_reference && typeof chosen.mmproj_path === "string" && chosen.mmproj_path.trim();
   if (!promptAssistEnabled) {
-    elements.promptModelSummary.textContent = chosen
-      ? `${chosen.name} is selected as the Prompt Assist interpreter, but Prompt Assist is currently off. Turn it on to use this model.`
-      : "Prompt Assist is currently off. You can still pick a model here in advance; Chatty-art will use it once Prompt Assist is turned on. Auto keeps Prompt Assist on the safer text-only route by default when enabled.";
+    elements.promptModelSummary.innerHTML = chosenCloud
+      ? buildCloudPromptAssistSummary(chosenCloud, "Prompt Assist is currently off. This cloud selection stays saved as an explicit route choice, but nothing will be sent until Prompt Assist is turned on.")
+      : chosen
+        ? buildLocalPromptAssistSummary(chosen, `${chosen.name} is selected as the Prompt Assist interpreter, but Prompt Assist is currently off. Turn it on to use this model.`)
+        : buildPromptAssistMessageCard("Prompt Assist is currently off. You can still pick a model here in advance; Chatty-art will use it once Prompt Assist is turned on. Auto keeps Prompt Assist on the safer text-only route by default when enabled.");
     return;
   }
 
-  elements.promptModelSummary.textContent = chosen
-    ? multimodal
-      ? `${chosen.name} is pinned as the Prompt Assist interpreter. This intentionally overrides the safe text-only default and allows one multimodal expressive model to handle both prompt expansion and image analysis.`
-      : `${chosen.name} is pinned as the Prompt Assist interpreter. Leave this on Auto if you want Chatty-art to stay on the safer text-only route.`
-    : "Auto keeps Prompt Assist on the safer text-only route by default. Advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.";
+  if (chosenCloud) {
+    elements.promptModelSummary.innerHTML = buildCloudPromptAssistSummary(
+      chosenCloud,
+      `Prompt Assist is currently routed through ${chosenCloud.modelName} on ${providerKindLabel(chosenCloud.providerKind)} / ${chosenCloud.providerName}. This selection reuses the saved cloud lane instead of the local llama.cpp helper path.`
+    );
+    return;
+  }
+
+  elements.promptModelSummary.innerHTML = chosen
+    ? buildLocalPromptAssistSummary(
+        chosen,
+        multimodal
+          ? `${chosen.name} is pinned as the Prompt Assist interpreter. This intentionally overrides the safe text-only default and allows one multimodal expressive model to handle both prompt expansion and image analysis.`
+          : `${chosen.name} is pinned as the Prompt Assist interpreter. Leave this on Auto if you want Chatty-art to stay on the safer text-only route.`
+      )
+    : buildPromptAssistMessageCard("Auto keeps Prompt Assist on the safer text-only route by default. Advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.");
+}
+
+function buildPromptAssistSelectorOptions(localModels, cloudModels) {
+  return [
+    `<option value="">Auto (Recommended)</option>`,
+    localModels.length
+      ? `<optgroup label="Local GGUFs">${localModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildDropdownLabel(model))}</option>`).join("")}</optgroup>`
+      : "",
+    cloudModels.length
+      ? `<optgroup label="Cloud routes">${cloudModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildPromptAssistCloudDropdownLabel(model))}</option>`).join("")}</optgroup>`
+      : "",
+  ].join("");
+}
+
+function buildPromptAssistCloudDropdownLabel(model) {
+  const provider = providerKindLabel(model.providerKind);
+  return `${model.modelName} | ${provider} | ${model.providerName} [Cloud Route]`;
+}
+
+function buildPromptAssistMessageCard(message) {
+  return `
+    <div class="model-summary-card">
+      <div class="model-summary-copy">${escapeHtml(message)}</div>
+    </div>
+  `;
+}
+
+function buildLocalPromptAssistSummary(model, message) {
+  const stateInfo = describeModelState(model);
+  const badges = [
+    createModelBadge("Local", "backend"),
+    createModelBadge(stateInfo.label, `state-${stateInfo.tone}`),
+    createModelBadge(formatBackendBadge(model.backend), "backend"),
+    createModelBadge(model.family, "family"),
+  ];
+  if ((model.supported_kinds || []).length) {
+    badges.push(createModelBadge(`Outputs: ${formatKinds(model.supported_kinds)}`, "outputs"));
+  }
+  const runtimeLine = buildExplicitRuntimeLine(model);
+  const recommendations = buildRecommendedLimitsMarkup(model);
+  return `
+    <div class="model-summary-card">
+      <div class="model-summary-head">
+        <strong class="model-summary-name">${escapeHtml(model.name)}</strong>
+      </div>
+      <div class="model-badges">${badges.join("")}</div>
+      ${runtimeLine ? `<div class="model-summary-runtime">${escapeHtml(runtimeLine)}</div>` : ""}
+      <div class="model-summary-copy">${escapeHtml(message)}</div>
+      ${recommendations}
+    </div>
+  `;
+}
+
+function buildCloudPromptAssistSummary(model, message) {
+  const verificationStatus = model.verification?.status ? model.verification.status : "Not verified yet.";
+  const providerBits = [
+    providerKindLabel(model.providerKind),
+    model.providerName,
+    model.hasApiKey ? "API key saved" : "No API key saved",
+  ];
+  return `
+    <div class="model-summary-card">
+      <div class="model-summary-head">
+        <strong class="model-summary-name">${escapeHtml(model.modelName)}</strong>
+      </div>
+      <div class="model-badges">
+        ${createModelBadge("Cloud", "backend")}
+        ${createModelBadge(providerKindLabel(model.providerKind), "family")}
+        ${createModelBadge("Prompt Assist", "outputs")}
+      </div>
+      <div class="model-summary-runtime">${escapeHtml(providerBits.join(" | "))}</div>
+      <div class="model-summary-copy">${escapeHtml(message)}</div>
+      <div class="recommended-limits">
+        <div class="recommended-limits-head">
+          <strong>Cloud Route Details</strong>
+          <span>${escapeHtml(model.baseUrl || "Saved route endpoint")}</span>
+        </div>
+        <div class="recommended-limits-list">
+          <div class="recommended-limit-row current-safe">
+            <strong>Privacy</strong>
+            <span>Prompt text leaves this machine only when this cloud route stays selected.</span>
+            <span>Reference images remain on their own Vision Assist lane unless you explicitly switch that lane too.</span>
+            <span class="recommended-current current-safe"><em>Verification:</em> ${escapeHtml(verificationStatus)}</span>
+            <span class="recommended-current-note">No automatic fallback occurs. If this route fails, Prompt Assist fails visibly instead of hopping lanes.</span>
+          </div>
+          <div class="recommended-limit-row current-stretch">
+            <strong>Usage shape</strong>
+            <span><em>Best fit:</em> prompt expansion, cleanup, structure, and optional richer brief drafting.</span>
+            <span><em>Watch for:</em> route latency, rate limits, and family-specific prompt behavior.</span>
+            <span><em>Configured model:</em> ${escapeHtml(model.modelName)}</span>
+            <span class="recommended-current current-stretch"><em>Route:</em> ${escapeHtml(cloudRouteIdentity(model, "Prompt Assist"))}</span>
+            <span class="recommended-current-note">This mirrors the local recommendation panel with cloud-facing route details instead of hardware pressure.</span>
+          </div>
+        </div>
+        <div class="recommended-limits-note">Cloud Prompt Assist is route-aware rather than hardware-aware. Expect latency and policy behavior to vary by endpoint and queue depth.</div>
+      </div>
+    </div>
+  `;
 }
 
 function renderVisionModelSelector() {
   const shouldShow = shouldShowVisionModelSelector();
+  const hasImageReference = hasVisionAssistImageReference();
   elements.visionModelBlock.classList.toggle("hidden", !shouldShow);
+  renderVisionAssistCloudControls();
+  const activeCloudProvider = activeVisionAssistCloudProvider();
 
   if (!shouldShow) {
     elements.visionModelSelect.innerHTML = `<option value="">Auto (Recommended)</option>`;
     elements.visionModelSelect.disabled = true;
-    elements.visionModelSummary.textContent = "Auto picks a local multimodal helper when Prompt Assist is working from an image reference. Right now it prefers Qwen2.5-VL-7B first and falls back to LLaVA.";
+    elements.visionModelSummary.innerHTML = buildPromptAssistMessageCard("Turn Prompt Assist on to review or preselect Vision Assist. Once Prompt Assist is active, you can keep Vision Assist on Auto or preselect a local/cloud image-analysis route before assigning a still image.");
     return;
   }
 
   const selected = elements.visionModelSelect.value;
   const visionModels = getVisionAssistModels();
+  const cloudModels = getVisionAssistCloudModels();
 
-  if (!visionModels.length) {
-    elements.visionModelSelect.innerHTML = `<option value="">No local vision models found</option>`;
+  if (!visionModels.length && !cloudModels.length) {
+    elements.visionModelSelect.innerHTML = `<option value="">No Vision Assist models found</option>`;
     elements.visionModelSelect.disabled = true;
-    elements.visionModelSummary.textContent = "Prompt Assist can still run, but Vision Assist has no surfaced local helper right now. Recommended pair: Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf plus mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf. Fallback pair: llava-v1.5-7b-Q4_K_M.gguf plus llava-v1.5-7b-mmproj-model-f16.gguf.";
+    elements.visionModelSummary.innerHTML = buildPromptAssistMessageCard("Prompt Assist can still run, but Vision Assist has no surfaced local or cloud helper right now. Recommended local pair: Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf plus mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf. Fallback local pair: llava-v1.5-7b-Q4_K_M.gguf plus llava-v1.5-7b-mmproj-model-f16.gguf.");
     return;
   }
 
   elements.visionModelSelect.disabled = false;
-  elements.visionModelSelect.innerHTML = [
-    `<option value="">Auto (Recommended)</option>`,
-    ...visionModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(visionAssistLabel(model))}</option>`),
-  ].join("");
+  elements.visionModelSelect.innerHTML = buildVisionAssistSelectorOptions(visionModels, cloudModels);
 
-  if (visionModels.some((model) => model.id === selected)) {
+  const activeCloudValue = activeCloudProvider ? `cloud:${activeCloudProvider.id}` : "";
+  if (selected && (visionModels.some((model) => model.id === selected) || cloudModels.some((model) => model.id === selected))) {
     elements.visionModelSelect.value = selected;
+  } else if (activeCloudValue && cloudModels.some((model) => model.id === activeCloudValue)) {
+    elements.visionModelSelect.value = activeCloudValue;
   } else {
     elements.visionModelSelect.value = "";
   }
 
   const chosen = visionModels.find((model) => model.id === elements.visionModelSelect.value) || null;
-  elements.visionModelSummary.textContent = chosen
-    ? `${visionAssistLabel(chosen)} is pinned as the image-analysis helper for Prompt Assist. Leave this on Auto if you want Chatty-art to choose for you.`
-    : "Auto lets Chatty-art choose a local multimodal helper for image analysis before Prompt Assist expands the handoff. Right now Auto prefers Qwen2.5-VL-7B first and falls back to LLaVA.";
+  const chosenCloud = cloudModels.find((model) => model.id === elements.visionModelSelect.value) || null;
+  if (!hasImageReference) {
+    if (chosenCloud) {
+      elements.visionModelSummary.innerHTML = buildCloudVisionAssistSummary(
+        chosenCloud,
+        `Vision Assist is preselected to use ${chosenCloud.modelName} on ${providerKindLabel(chosenCloud.providerKind)} / ${chosenCloud.providerName}, but it will stay inactive until you assign a still image as the primary reference.`
+      );
+      return;
+    }
+    elements.visionModelSummary.innerHTML = chosen
+      ? buildLocalVisionAssistSummary(
+          chosen,
+          `${visionAssistLabel(chosen)} is preselected as the Vision Assist helper, but it will stay inactive until you assign a still image as the primary reference.`
+        )
+      : buildPromptAssistMessageCard("Vision Assist is available now because Prompt Assist is on, but it only runs after you assign a still image as the primary reference. Auto will prefer Qwen2.5-VL-7B first and fall back to LLaVA once an image is present.");
+    return;
+  }
+  if (chosenCloud) {
+    elements.visionModelSummary.innerHTML = buildCloudVisionAssistSummary(
+      chosenCloud,
+      `Vision Assist is currently routed through ${chosenCloud.modelName} on ${providerKindLabel(chosenCloud.providerKind)} / ${chosenCloud.providerName}. This selection reuses the saved Vision Assist cloud lane instead of the local multimodal helper path.`
+    );
+    return;
+  }
+  elements.visionModelSummary.innerHTML = chosen
+    ? buildLocalVisionAssistSummary(
+        chosen,
+        `${visionAssistLabel(chosen)} is pinned as the image-analysis helper for Prompt Assist. Leave this on Auto if you want Chatty-art to choose for you.`
+      )
+    : buildPromptAssistMessageCard("Auto lets Chatty-art choose a local multimodal helper for image analysis before Prompt Assist expands the handoff. Right now Auto prefers Qwen2.5-VL-7B first and falls back to LLaVA.");
+}
+
+function buildVisionAssistSelectorOptions(localModels, cloudModels) {
+  return [
+    `<option value="">Auto (Recommended)</option>`,
+    localModels.length
+      ? `<optgroup label="Local GGUFs">${localModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(visionAssistLabel(model))}</option>`).join("")}</optgroup>`
+      : "",
+    cloudModels.length
+      ? `<optgroup label="Cloud routes">${cloudModels.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(buildVisionAssistCloudDropdownLabel(model))}</option>`).join("")}</optgroup>`
+      : "",
+  ].join("");
+}
+
+function buildVisionAssistCloudDropdownLabel(model) {
+  const provider = providerKindLabel(model.providerKind);
+  return `${model.modelName} | ${provider} | ${model.providerName} [Cloud Route]`;
+}
+
+function buildLocalVisionAssistSummary(model, message) {
+  const stateInfo = describeModelState(model);
+  const badges = [
+    createModelBadge("Local", "backend"),
+    createModelBadge(stateInfo.label, `state-${stateInfo.tone}`),
+    createModelBadge(formatBackendBadge(model.backend), "backend"),
+    createModelBadge("Vision Assist", "outputs"),
+  ];
+  if (model.supports_image_reference) {
+    badges.push(createModelBadge("Image analysis", "reference"));
+  }
+  const runtimeLine = buildExplicitRuntimeLine(model);
+  const recommendations = buildRecommendedLimitsMarkup(model);
+  return `
+    <div class="model-summary-card">
+      <div class="model-summary-head">
+        <strong class="model-summary-name">${escapeHtml(visionAssistLabel(model))}</strong>
+      </div>
+      <div class="model-badges">${badges.join("")}</div>
+      ${runtimeLine ? `<div class="model-summary-runtime">${escapeHtml(runtimeLine)}</div>` : ""}
+      <div class="model-summary-copy">${escapeHtml(message)}</div>
+      ${recommendations}
+    </div>
+  `;
+}
+
+function buildCloudVisionAssistSummary(model, message) {
+  const verificationStatus = model.verification?.status ? model.verification.status : "Not verified yet.";
+  const providerBits = [
+    providerKindLabel(model.providerKind),
+    model.providerName,
+    model.hasApiKey ? "API key saved" : "No API key saved",
+  ];
+  return `
+    <div class="model-summary-card">
+      <div class="model-summary-head">
+        <strong class="model-summary-name">${escapeHtml(model.modelName)}</strong>
+      </div>
+      <div class="model-badges">
+        ${createModelBadge("Cloud", "backend")}
+        ${createModelBadge(providerKindLabel(model.providerKind), "family")}
+        ${createModelBadge("Vision Assist", "outputs")}
+      </div>
+      <div class="model-summary-runtime">${escapeHtml(providerBits.join(" | "))}</div>
+      <div class="model-summary-copy">${escapeHtml(message)}</div>
+      <div class="recommended-limits">
+        <div class="recommended-limits-head">
+          <strong>Cloud Route Details</strong>
+          <span>${escapeHtml(model.baseUrl || "Saved route endpoint")}</span>
+        </div>
+        <div class="recommended-limits-list">
+          <div class="recommended-limit-row current-safe">
+            <strong>Privacy</strong>
+            <span>The selected reference image may leave this machine only when this Vision Assist cloud route stays selected.</span>
+            <span>Prompt Assist and final generation can still stay on their own local or cloud lanes.</span>
+            <span class="recommended-current current-safe"><em>Verification:</em> ${escapeHtml(verificationStatus)}</span>
+            <span class="recommended-current-note">No automatic fallback occurs. If this route fails, Vision Assist fails visibly instead of switching to another lane.</span>
+          </div>
+          <div class="recommended-limit-row current-stretch">
+            <strong>Usage shape</strong>
+            <span><em>Best fit:</em> image analysis, visual cue extraction, scene breakdown, and edit-preservation hints.</span>
+            <span><em>Watch for:</em> route latency, image-input policy checks, and endpoint-specific multimodal behavior.</span>
+            <span><em>Configured model:</em> ${escapeHtml(model.modelName)}</span>
+            <span class="recommended-current current-stretch"><em>Route:</em> ${escapeHtml(cloudRouteIdentity(model, "Vision Assist"))}</span>
+            <span class="recommended-current-note">This mirrors the local recommendation panel with cloud-facing route details instead of hardware pressure.</span>
+          </div>
+        </div>
+        <div class="recommended-limits-note">Cloud Vision Assist is route-aware rather than hardware-aware. Expect latency and image-input behavior to vary by endpoint and queue depth.</div>
+      </div>
+    </div>
+  `;
 }
 
 function visionAssistLabel(model) {
@@ -4284,6 +6217,7 @@ function formatKinds(kinds) {
 function formatBackendBadge(backend) {
   if (backend === "stable_diffusion_cpp") return "stable-diffusion.cpp";
   if (backend === "audio_runtime") return "audio runtime";
+  if (backend === "cloud") return "cloud provider";
   return "llama.cpp";
 }
 
@@ -4295,6 +6229,19 @@ async function fetchJson(url) {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Request failed for ${url}`);
+  }
+  return response.json();
+}
+
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Request failed for ${url}`);
   }
   return response.json();
 }

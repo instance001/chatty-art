@@ -112,17 +112,190 @@
             <div class="selection-summary" id="modelSummary">No models detected yet.</div>
           </div>
 
+          <div class="field-block" id="mediaGenerationCloudBlock">
+            <div class="field-title-row">
+              <span class="field-title">Media Generation Route</span>
+              <span class="panel-note">Local or Cloud</span>
+            </div>
+            <label class="field-block">
+              <span class="field-title">Output Route</span>
+              <select id="mediaGenerationLaneSelect"></select>
+              <span class="setting-copy" id="mediaGenerationLaneSummary">Local generation is still the default. Cloud output is opt-in only and remains separate from the local runtimes.</span>
+            </label>
+            <label class="field-block">
+              <span class="field-title">Saved Cloud Account / Route</span>
+              <select id="mediaGenerationCloudEntrySelect"></select>
+              <span class="setting-copy" id="mediaGenerationCloudStatus">No saved cloud media account or route yet.</span>
+            </label>
+            <details class="provider-setup-disclosure">
+              <summary>Provider Setup, Credentials, and Capability Declaration</summary>
+              <div class="provider-setup-body">
+                <div class="cloud-form-grid">
+                  <label class="field-block">
+                    <span class="field-title">Display Name</span>
+                    <input id="mediaGenerationCloudNameInput" type="text" placeholder="My Cloud Images">
+                  </label>
+                  <label class="field-block">
+                    <span class="field-title">Provider</span>
+                    <select id="mediaGenerationCloudProviderInput"></select>
+                  </label>
+                </div>
+                <label class="field-block">
+                  <span class="field-title">Base URL</span>
+                  <input id="mediaGenerationCloudBaseUrlInput" type="text" placeholder="https://provider.example/v1">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">Cloud Image Model Name</span>
+                  <input id="mediaGenerationCloudImageModelInput" type="text" placeholder="image-model-name">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">Cloud Video Model Name</span>
+                  <input id="mediaGenerationCloudVideoModelInput" type="text" placeholder="video-model-name">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">Cloud Speech Model Name</span>
+                  <input id="mediaGenerationCloudAudioModelInput" type="text" placeholder="speech-model-name">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">Cloud Speech Voice / Speaker ID</span>
+                  <input id="mediaGenerationCloudVoiceInput" type="text" placeholder="provider-specific voice id">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">API Key</span>
+                  <input id="mediaGenerationCloudApiKeyInput" type="password" placeholder="Paste a key to save or replace it">
+                  <span class="setting-copy">Cloud output is explicit and opt-in. This lane stays separate from the local runtimes. Voice or speaker ids are provider-specific. The current first-family video adapter remains temporary and end-frame and control-video references are still not enabled on the cloud video lane.</span>
+                </label>
+                <label class="setting-toggle">
+                  <input id="mediaGenerationCloudEnabledInput" type="checkbox" checked>
+                  <span>Enabled for lane selection</span>
+                </label>
+                <div class="cloud-action-row">
+                  <button id="saveMediaGenerationCloudButton" class="ghost-button mini-ghost-button" type="button">Save Provider</button>
+                  <button id="verifyMediaGenerationCloudButton" class="ghost-button mini-ghost-button" type="button">Verify Route</button>
+                  <button id="deleteMediaGenerationCloudButton" class="ghost-button mini-ghost-button danger-button" type="button">Delete Provider</button>
+                </div>
+              </div>
+            </details>
+          </div>
+
           <label class="field-block" id="promptModelBlock">
             <span class="field-title">Prompt Assist Model</span>
             <select id="promptModelSelect"></select>
-            <span class="setting-copy" id="promptModelSummary">Auto keeps Prompt Assist on the safer text-only route by default. Advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.</span>
+            <div class="setting-copy" id="promptModelSummary">Auto keeps Prompt Assist on the safer text-only route by default. Advanced users can pin a multimodal expressive model here if they want one model handling prompt expansion and image analysis.</div>
           </label>
+
+          <div class="field-block" id="promptAssistCloudBlock">
+            <div class="field-title-row">
+              <span class="field-title">Prompt Assist Cloud Lane</span>
+              <span class="panel-note">Optional</span>
+            </div>
+            <label class="field-block">
+              <span class="field-title">Prompt Assist Route</span>
+              <select id="promptAssistLaneSelect"></select>
+              <span class="setting-copy" id="promptAssistLaneSummary">Local Prompt Assist is still the default.</span>
+            </label>
+            <label class="field-block">
+              <span class="field-title">Saved Cloud Account / Route</span>
+              <select id="promptAssistCloudEntrySelect"></select>
+              <span class="setting-copy" id="promptAssistCloudStatus">No saved Prompt Assist cloud account or route yet.</span>
+            </label>
+            <details class="provider-setup-disclosure">
+              <summary>Provider Setup, Credentials, and Capability Declaration</summary>
+              <div class="provider-setup-body">
+                <div class="cloud-form-grid">
+                  <label class="field-block">
+                    <span class="field-title">Display Name</span>
+                    <input id="promptAssistCloudNameInput" type="text" placeholder="My Prompt Assist">
+                  </label>
+                  <label class="field-block">
+                    <span class="field-title">Provider</span>
+                    <select id="promptAssistCloudProviderInput"></select>
+                  </label>
+                </div>
+                <label class="field-block">
+                  <span class="field-title">Base URL</span>
+                  <input id="promptAssistCloudBaseUrlInput" type="text" placeholder="https://provider.example/v1">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">Prompt Assist Model Name</span>
+                  <input id="promptAssistCloudModelInput" type="text" placeholder="text-model-name">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">API Key</span>
+                  <input id="promptAssistCloudApiKeyInput" type="password" placeholder="Paste a key to save or replace it">
+                  <span class="setting-copy">Used only when you deliberately route Prompt Assist through cloud. Prompt Assist remains a separate lane from Vision Assist and final media generation.</span>
+                </label>
+                <label class="setting-toggle">
+                  <input id="promptAssistCloudEnabledInput" type="checkbox" checked>
+                  <span>Enabled for lane selection</span>
+                </label>
+                <div class="cloud-action-row">
+                  <button id="savePromptAssistCloudButton" class="ghost-button mini-ghost-button" type="button">Save Provider</button>
+                  <button id="verifyPromptAssistCloudButton" class="ghost-button mini-ghost-button" type="button">Verify Provider</button>
+                  <button id="deletePromptAssistCloudButton" class="ghost-button mini-ghost-button danger-button" type="button">Delete Provider</button>
+                </div>
+              </div>
+            </details>
+          </div>
 
           <label class="field-block hidden" id="visionModelBlock">
             <span class="field-title">Vision Assist Model</span>
             <select id="visionModelSelect"></select>
-            <span class="setting-copy" id="visionModelSummary">Auto picks a local multimodal helper when Prompt Assist is working from an image reference. Right now it prefers Qwen2.5-VL-7B first and falls back to LLaVA.</span>
+            <div class="setting-copy" id="visionModelSummary">Auto picks a local multimodal helper when Prompt Assist is working from an image reference. Right now it prefers Qwen2.5-VL-7B first and falls back to LLaVA.</div>
           </label>
+          <div class="field-block hidden" id="visionAssistCloudBlock">
+            <div class="field-title-row">
+              <span class="field-title">Vision Assist Cloud Lane</span>
+              <span class="panel-note">Optional</span>
+            </div>
+            <label class="field-block">
+              <span class="field-title">Vision Assist Route</span>
+              <select id="visionAssistLaneSelect"></select>
+              <span class="setting-copy" id="visionAssistLaneSummary">Local Vision Assist is still the default.</span>
+            </label>
+            <label class="field-block">
+              <span class="field-title">Saved Cloud Account / Route</span>
+              <select id="visionAssistCloudEntrySelect"></select>
+              <span class="setting-copy" id="visionAssistCloudStatus">No saved Vision Assist cloud account or route yet.</span>
+            </label>
+            <details class="provider-setup-disclosure">
+              <summary>Provider Setup, Credentials, and Capability Declaration</summary>
+              <div class="provider-setup-body">
+                <div class="cloud-form-grid">
+                  <label class="field-block">
+                    <span class="field-title">Display Name</span>
+                    <input id="visionAssistCloudNameInput" type="text" placeholder="My Vision Assist">
+                  </label>
+                  <label class="field-block">
+                    <span class="field-title">Provider</span>
+                    <select id="visionAssistCloudProviderInput"></select>
+                  </label>
+                </div>
+                <label class="field-block">
+                  <span class="field-title">Base URL</span>
+                  <input id="visionAssistCloudBaseUrlInput" type="text" placeholder="https://provider.example/v1">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">Vision Assist Model Name</span>
+                  <input id="visionAssistCloudModelInput" type="text" placeholder="vision-model-name">
+                </label>
+                <label class="field-block">
+                  <span class="field-title">API Key</span>
+                  <input id="visionAssistCloudApiKeyInput" type="password" placeholder="Paste a key to save or replace it">
+                  <span class="setting-copy">Used only when an image reference needs cloud Vision Assist. That selected image may be uploaded on this lane; Prompt Assist and final media generation can still stay on their own lanes.</span>
+                </label>
+                <label class="setting-toggle">
+                  <input id="visionAssistCloudEnabledInput" type="checkbox" checked>
+                  <span>Enabled for lane selection</span>
+                </label>
+                <div class="cloud-action-row">
+                  <button id="saveVisionAssistCloudButton" class="ghost-button mini-ghost-button" type="button">Save Provider</button>
+                  <button id="verifyVisionAssistCloudButton" class="ghost-button mini-ghost-button" type="button">Verify Provider</button>
+                  <button id="deleteVisionAssistCloudButton" class="ghost-button mini-ghost-button danger-button" type="button">Delete Provider</button>
+                </div>
+              </div>
+            </details>
+          </div>
         </article>
 
         <article class="panel">
@@ -172,8 +345,14 @@
                 <option value="square256">256x256</option>
                 <option value="square512">512x512</option>
                 <option value="square768">768x768</option>
+                <option value="video_landscape720">1280x720</option>
+                <option value="video_portrait720">720x1280</option>
+                <option value="video_landscape1024">1792x1024</option>
+                <option value="video_portrait1024">1024x1792</option>
+                <option value="video_landscape1080">1920x1080</option>
+                <option value="video_portrait1080">1080x1920</option>
               </select>
-              <span class="setting-copy">Used for GIF/video output. Start small for video models if VRAM is tight.</span>
+              <span class="setting-copy">Used for GIF/video output. Start small for local video models if VRAM is tight. Cloud video currently expects one of the supported portrait or landscape sizes listed here.</span>
             </label>
 
             <label class="setting-card">

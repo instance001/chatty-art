@@ -74,6 +74,7 @@ pub enum ModelBackend {
     LlamaCpp,
     StableDiffusionCpp,
     AudioRuntime,
+    Cloud,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +112,247 @@ pub struct HardwareProfile {
     pub gpu_label: String,
     pub dedicated_vram_gb: Option<f32>,
     pub shared_memory_gb: Option<f32>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudProviderKind {
+    OpenAi,
+    #[default]
+    OpenAiCompatible,
+    Anthropic,
+    Gemini,
+    XAiGrok,
+    DeepSeek,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderCapabilities {
+    #[serde(default)]
+    pub text_assist: bool,
+    #[serde(default)]
+    pub vision_assist: bool,
+    #[serde(default)]
+    pub image_generation: bool,
+    #[serde(default)]
+    pub video_generation: bool,
+    #[serde(default)]
+    pub audio_generation: bool,
+}
+
+impl Default for CloudProviderCapabilities {
+    fn default() -> Self {
+        Self {
+            text_assist: true,
+            vision_assist: false,
+            image_generation: false,
+            video_generation: false,
+            audio_generation: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudVerificationStatus {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub checked_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub provider_kind: CloudProviderKind,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub prompt_assist_model_name: String,
+    #[serde(default)]
+    pub vision_model_name: String,
+    #[serde(default)]
+    pub image_generation_model_name: String,
+    #[serde(default)]
+    pub video_generation_model_name: String,
+    #[serde(default)]
+    pub audio_generation_model_name: String,
+    #[serde(default)]
+    pub audio_generation_voice: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub capabilities: CloudProviderCapabilities,
+    #[serde(default)]
+    pub prompt_assist_verification: CloudVerificationStatus,
+    #[serde(default)]
+    pub vision_assist_verification: CloudVerificationStatus,
+    #[serde(default)]
+    pub media_generation_verification: CloudVerificationStatus,
+}
+
+impl Default for CloudProviderEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            display_name: String::new(),
+            provider_kind: CloudProviderKind::default(),
+            base_url: String::new(),
+            prompt_assist_model_name: String::new(),
+            vision_model_name: String::new(),
+            image_generation_model_name: String::new(),
+            video_generation_model_name: String::new(),
+            audio_generation_model_name: String::new(),
+            audio_generation_voice: String::new(),
+            enabled: true,
+            capabilities: CloudProviderCapabilities::default(),
+            prompt_assist_verification: CloudVerificationStatus::default(),
+            vision_assist_verification: CloudVerificationStatus::default(),
+            media_generation_verification: CloudVerificationStatus::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudLaneAssignments {
+    #[serde(default = "default_prompt_assist_lane")]
+    pub prompt_assist: String,
+    #[serde(default = "default_vision_assist_lane")]
+    pub vision_assist: String,
+    #[serde(default = "default_media_generation_lane")]
+    pub media_generation: String,
+}
+
+impl Default for CloudLaneAssignments {
+    fn default() -> Self {
+        Self {
+            prompt_assist: default_prompt_assist_lane(),
+            vision_assist: default_vision_assist_lane(),
+            media_generation: default_media_generation_lane(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudConfig {
+    #[serde(default)]
+    pub api_key_lanes_enabled: bool,
+    #[serde(default)]
+    pub cloud_providers: Vec<CloudProviderEntry>,
+    #[serde(default)]
+    pub lane_assignments: CloudLaneAssignments,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            api_key_lanes_enabled: false,
+            cloud_providers: Vec::new(),
+            lane_assignments: CloudLaneAssignments::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderSummary {
+    pub id: String,
+    pub display_name: String,
+    pub provider_kind: CloudProviderKind,
+    pub base_url: String,
+    pub prompt_assist_model_name: String,
+    pub vision_model_name: String,
+    pub image_generation_model_name: String,
+    pub video_generation_model_name: String,
+    pub audio_generation_model_name: String,
+    pub audio_generation_voice: String,
+    pub enabled: bool,
+    pub capabilities: CloudProviderCapabilities,
+    pub prompt_assist_verification: CloudVerificationStatus,
+    pub vision_assist_verification: CloudVerificationStatus,
+    pub media_generation_verification: CloudVerificationStatus,
+    pub has_api_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderUpsertRequest {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub display_name: String,
+    #[serde(default)]
+    pub provider_kind: CloudProviderKind,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub prompt_assist_model_name: String,
+    #[serde(default)]
+    pub vision_model_name: String,
+    #[serde(default)]
+    pub image_generation_model_name: String,
+    #[serde(default)]
+    pub video_generation_model_name: String,
+    #[serde(default)]
+    pub audio_generation_model_name: String,
+    #[serde(default)]
+    pub audio_generation_voice: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderDeleteRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderVerifyRequest {
+    pub id: String,
+    #[serde(default)]
+    pub lane: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderUpsertResponse {
+    pub provider: CloudProviderSummary,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderDeleteResponse {
+    pub id: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProviderVerifyResponse {
+    pub provider: CloudProviderSummary,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudProvidersResponse {
+    pub api_key_lanes_enabled: bool,
+    pub providers: Vec<CloudProviderSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudLaneAssignmentsResponse {
+    pub lane_assignments: CloudLaneAssignments,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudLaneAssignmentsUpdateRequest {
+    pub lane_assignments: CloudLaneAssignments,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudLaneAssignmentsUpdateResponse {
+    pub lane_assignments: CloudLaneAssignments,
     pub note: String,
 }
 
@@ -156,6 +398,12 @@ pub enum VideoResolutionPreset {
     #[default]
     Square512,
     Square768,
+    VideoLandscape720,
+    VideoPortrait720,
+    VideoLandscape1024,
+    VideoPortrait1024,
+    VideoLandscape1080,
+    VideoPortrait1080,
 }
 
 impl VideoResolutionPreset {
@@ -164,6 +412,12 @@ impl VideoResolutionPreset {
             Self::Square256 => (256, 256),
             Self::Square512 => (512, 512),
             Self::Square768 => (768, 768),
+            Self::VideoLandscape720 => (1280, 720),
+            Self::VideoPortrait720 => (720, 1280),
+            Self::VideoLandscape1024 => (1792, 1024),
+            Self::VideoPortrait1024 => (1024, 1792),
+            Self::VideoLandscape1080 => (1920, 1080),
+            Self::VideoPortrait1080 => (1080, 1920),
         }
     }
 
@@ -172,6 +426,12 @@ impl VideoResolutionPreset {
             Self::Square256 => "256x256",
             Self::Square512 => "512x512",
             Self::Square768 => "768x768",
+            Self::VideoLandscape720 => "1280x720",
+            Self::VideoPortrait720 => "720x1280",
+            Self::VideoLandscape1024 => "1792x1024",
+            Self::VideoPortrait1024 => "1024x1792",
+            Self::VideoLandscape1080 => "1920x1080",
+            Self::VideoPortrait1080 => "1080x1920",
         }
     }
 }
@@ -194,6 +454,22 @@ fn default_audio_duration_seconds() -> u32 {
 
 fn default_low_vram_mode() -> bool {
     false
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_prompt_assist_lane() -> String {
+    "local_auto".to_string()
+}
+
+fn default_vision_assist_lane() -> String {
+    "local_auto".to_string()
+}
+
+fn default_media_generation_lane() -> String {
+    "local_only".to_string()
 }
 
 fn default_sampler() -> String {
@@ -656,6 +932,14 @@ pub struct OutputEntry {
     pub prompt_assist: PromptAssistMode,
     #[serde(default)]
     pub interpreter_model: Option<String>,
+    #[serde(default)]
+    pub prompt_assist_route: Option<String>,
+    #[serde(default)]
+    pub vision_model: Option<String>,
+    #[serde(default)]
+    pub vision_assist_route: Option<String>,
+    #[serde(default)]
+    pub output_route: Option<String>,
     #[serde(default)]
     pub lora_name: Option<String>,
     #[serde(default)]
