@@ -37,6 +37,37 @@ Chatty-art is a simple local image/GIF/video/audio generator with:
 - Hosted LoRA inbox import from sibling modules through the approved `lora_imports` bridge lane
 - Explicit `Delete Selected` cleanup for saved outputs, using the same checkbox surface as handoff
 
+## Generation Pipeline Map
+
+```mermaid
+flowchart TB
+    user["Operator<br/>prompt, mode, output kind, settings"] --> dashboard["HTML dashboard<br/>Controls + Outputs + Input Tray"]
+
+    models["models/<br/>GGUFs, realism weights, LoRAs, audio packages"] --> runtime["Rust backend<br/>model detection + job orchestration"]
+    refs["input/ + outputs/<br/>guide, edit, voice reference, reusable media"] --> tray["Input Tray<br/>reference role assignment"]
+    tray --> dashboard
+    dashboard --> handoff["Preview handoff<br/>prompt + references + settings"]
+
+    handoff --> vision{"Still-image reference<br/>and Prompt Assist on?"}
+    vision -->|yes| visionAssist["Vision Assist<br/>local multimodal read"]
+    vision -->|no| promptAssist
+    visionAssist --> promptAssist["Prompt Assist<br/>local brief compiler"]
+    promptAssist --> lane{"Generation lane"}
+
+    lane --> expressive["Expressive lane<br/>llama.cpp planner + local renderer"]
+    lane --> realism["Realism lane<br/>stable-diffusion.cpp / audio backends"]
+
+    expressive --> outputs["outputs/<br/>PNG, GIF, WAV + sidecars"]
+    realism --> outputs
+    outputs --> dashboard
+
+    outputs --> cog["Hosted module handoffs<br/>Chatty-lora dataset candidates<br/>Chatty_Sandbox review"]
+    outputs --> cleanup["Delete Selected<br/>explicit output cleanup"]
+
+    runtime -. progress .-> dashboard
+    runtime -. ECG / hardware limits .-> dashboard
+```
+
 ## Related Docs
 
 - [USER_MANUAL.md](./USER_MANUAL.md)
