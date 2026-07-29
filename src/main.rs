@@ -86,6 +86,7 @@ const GENERATION_CANCELED_MESSAGE: &str = "Generation canceled.";
 
 #[derive(Debug)]
 struct AppPaths {
+    root_dir: PathBuf,
     models_dir: PathBuf,
     input_dir: PathBuf,
     outputs_dir: PathBuf,
@@ -101,6 +102,7 @@ impl AppPaths {
     fn discover() -> Result<Self> {
         let root = discover_app_root()?;
         Ok(Self {
+            root_dir: root.clone(),
             models_dir: root.join("models"),
             input_dir: root.join("input"),
             outputs_dir: root.join("outputs"),
@@ -114,7 +116,9 @@ impl AppPaths {
     }
 
     fn ensure_layout(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.root_dir)?;
         std::fs::create_dir_all(&self.models_dir)?;
+        std::fs::create_dir_all(self.models_dir.join("loras"))?;
         std::fs::create_dir_all(self.input_dir.join("images"))?;
         std::fs::create_dir_all(self.input_dir.join("audio"))?;
         std::fs::create_dir_all(self.input_dir.join("video"))?;
@@ -122,42 +126,57 @@ impl AppPaths {
         std::fs::create_dir_all(self.outputs_dir.join("gif"))?;
         std::fs::create_dir_all(self.outputs_dir.join("video"))?;
         std::fs::create_dir_all(self.outputs_dir.join("audio"))?;
+        std::fs::create_dir_all(&self.runtime_dir)?;
+        std::fs::create_dir_all(&self.diffuse_runtime_dir)?;
         std::fs::create_dir_all(&self.audio_runtime_dir)?;
         std::fs::create_dir_all(&self.config_dir)?;
+        std::fs::create_dir_all(self.root_dir.join("bridge").join("incoming_assets"))?;
+        std::fs::create_dir_all(self.root_dir.join("workflows"))?;
         Ok(())
     }
 }
 
 fn discover_app_root() -> Result<PathBuf> {
+    if let Some(override_path) = std::env::var_os("CHATTY_ART_BASE_PATH") {
+        let path = PathBuf::from(override_path);
+        if path.as_os_str().is_empty() {
+            bail!("CHATTY_ART_BASE_PATH is set but empty.");
+        }
+        return Ok(path);
+    }
+
     let mut candidates = Vec::new();
-    candidates.push(std::env::current_dir().context("failed to get current directory")?);
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             candidates.push(parent.to_path_buf());
         }
     }
+    let current_dir = std::env::current_dir().context("failed to get current directory")?;
+    candidates.push(current_dir.clone());
 
-    for candidate in candidates {
-        if let Some(root) = find_chatty_art_root(&candidate) {
+    for candidate in &candidates {
+        if let Some(root) = find_chatty_art_source_root(candidate) {
             return Ok(root);
         }
     }
 
-    bail!(
-        "Could not find the Chatty-art project root. Start the app from inside the project folder, or make sure the folder contains Cargo.toml, src/main.rs, and static/index.html."
-    )
+    if let Some(exe_parent) = candidates.first() {
+        return Ok(exe_parent.clone());
+    }
+
+    Ok(current_dir)
 }
 
-fn find_chatty_art_root(start: &Path) -> Option<PathBuf> {
+fn find_chatty_art_source_root(start: &Path) -> Option<PathBuf> {
     for ancestor in start.ancestors() {
-        if is_chatty_art_root(ancestor) {
+        if is_chatty_art_source_root(ancestor) {
             return Some(ancestor.to_path_buf());
         }
     }
     None
 }
 
-fn is_chatty_art_root(path: &Path) -> bool {
+fn is_chatty_art_source_root(path: &Path) -> bool {
     path.join("Cargo.toml").exists()
         && path.join("src").join("main.rs").exists()
         && path.join("static").join("index.html").exists()
@@ -5071,6 +5090,7 @@ mod tests {
 
     fn dummy_paths() -> AppPaths {
         AppPaths {
+            root_dir: PathBuf::from("."),
             models_dir: PathBuf::from("."),
             input_dir: PathBuf::from("."),
             outputs_dir: PathBuf::from("."),

@@ -8,6 +8,12 @@ Standalone local media generator, and ChattyCog-compatible module drop-in.
 
 (Drop me in ChattyCog's `modules/` folder!)
 
+## Storage Layout
+
+Chatty-art stores its runtime data beside the active app root. When running from a source checkout, that root is the repository folder. When running from a packaged executable, it is the executable's folder. Set `CHATTY_ART_BASE_PATH` to force a different portable data folder.
+
+On first run Chatty-art creates the folders it needs, including `models/`, `input/`, `outputs/`, `runtime/`, `diffuse_runtime/`, `audio_runtime/`, `bridge/incoming_assets/`, `workflows/`, and `runtime/config/`.
+
 Chatty-art is a simple local image/GIF/video/audio generator with:
 
 - GGUF auto-detection from `models/`
