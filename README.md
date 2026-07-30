@@ -12,7 +12,7 @@ https://github.com/instance001/chatty-lora
 | ![Chatty-art output tray](<./assets/Screenshot 2026-07-30 120124.png>) | ![Chatty-art generated result](<./assets/Screenshot 2026-07-29 090046.png>) |
 | ![Chatty-art advanced settings](<./assets/Screenshot 2026-07-30 120235.png>) | ![Chatty-art generation state](<./assets/Screenshot 2026-07-19 164914.png>) |
 | ![Chatty-art prompt assist](<./assets/Screenshot 2026-07-30 120301.png>) | ![Chatty-art model panel](<./assets/Screenshot 2026-07-30 120338.png>) |
-| ![Chatty-art input tray](<./assets/Screenshot 2026-07-30 120359.png>) |  |
+| ![Chatty-art input tray](<./assets/Screenshot 2026-07-30 120359.png>) | ![Chatty-art audio controls](<./assets/Screenshot 2026-07-30 124910.png>) |
 
 Standalone local media generator, and ChattyCog-compatible module drop-in.
 
