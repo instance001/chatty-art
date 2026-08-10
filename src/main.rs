@@ -83,6 +83,29 @@ use crate::{
 
 const MAX_RUNTIME_SEED: u64 = u32::MAX as u64;
 const GENERATION_CANCELED_MESSAGE: &str = "Generation canceled.";
+const APP_LAYOUT_DIRS: &[&str] = &[
+    "models",
+    "models/loras",
+    "models/lora",
+    "input",
+    "input/images",
+    "input/audio",
+    "input/video",
+    "outputs",
+    "outputs/image",
+    "outputs/gif",
+    "outputs/video",
+    "outputs/audio",
+    "runtime",
+    "runtime/config",
+    "diffuse_runtime",
+    "audio_runtime",
+    "audio_runtime/outetts",
+    "audio_runtime/stable_audio_tools",
+    "bridge",
+    "bridge/incoming_assets",
+    "workflows",
+];
 
 #[derive(Debug)]
 struct AppPaths {
@@ -117,23 +140,20 @@ impl AppPaths {
 
     fn ensure_layout(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root_dir)?;
-        std::fs::create_dir_all(&self.models_dir)?;
-        std::fs::create_dir_all(self.models_dir.join("loras"))?;
-        std::fs::create_dir_all(self.input_dir.join("images"))?;
-        std::fs::create_dir_all(self.input_dir.join("audio"))?;
-        std::fs::create_dir_all(self.input_dir.join("video"))?;
-        std::fs::create_dir_all(self.outputs_dir.join("image"))?;
-        std::fs::create_dir_all(self.outputs_dir.join("gif"))?;
-        std::fs::create_dir_all(self.outputs_dir.join("video"))?;
-        std::fs::create_dir_all(self.outputs_dir.join("audio"))?;
-        std::fs::create_dir_all(&self.runtime_dir)?;
-        std::fs::create_dir_all(&self.diffuse_runtime_dir)?;
-        std::fs::create_dir_all(&self.audio_runtime_dir)?;
+        for relative in APP_LAYOUT_DIRS {
+            std::fs::create_dir_all(app_layout_path(&self.root_dir, relative))?;
+        }
         std::fs::create_dir_all(&self.config_dir)?;
-        std::fs::create_dir_all(self.root_dir.join("bridge").join("incoming_assets"))?;
-        std::fs::create_dir_all(self.root_dir.join("workflows"))?;
         Ok(())
     }
+}
+
+fn app_layout_path(root: &Path, relative: &str) -> PathBuf {
+    let mut path = root.to_path_buf();
+    for component in relative.split('/') {
+        path.push(component);
+    }
+    path
 }
 
 fn discover_app_root() -> Result<PathBuf> {
@@ -4964,8 +4984,8 @@ mod tests {
     };
 
     use super::{
-        AppPaths, MAX_RUNTIME_SEED, build_prompt_handoff, choose_prompt_interpreter_model,
-        detect_model_support, parameter_hint, resolve_runtime_seed,
+        APP_LAYOUT_DIRS, AppPaths, MAX_RUNTIME_SEED, app_layout_path, build_prompt_handoff,
+        choose_prompt_interpreter_model, detect_model_support, parameter_hint, resolve_runtime_seed,
     };
     use crate::types::{
         AudioPromptSegment, GenerationSettings, GenerationStyle, MediaKind, ModelBackend,
@@ -5067,6 +5087,54 @@ mod tests {
             supports_voice_output: false,
             mmproj_path: None,
         }
+    }
+
+    #[test]
+    fn ensure_layout_bootstraps_binary_first_run_layout() {
+        let root = temp_dir("first-run-layout");
+        let runtime_dir = root.join("runtime");
+        let paths = AppPaths {
+            root_dir: root.clone(),
+            models_dir: root.join("models"),
+            input_dir: root.join("input"),
+            outputs_dir: root.join("outputs"),
+            runtime_dir: runtime_dir.clone(),
+            config_dir: runtime_dir.join("config"),
+            config_path: crate::app_config::default_config_path(&runtime_dir),
+            secrets_path: crate::secrets::default_secrets_path(&runtime_dir),
+            diffuse_runtime_dir: root.join("diffuse_runtime"),
+            audio_runtime_dir: root.join("audio_runtime"),
+        };
+
+        paths.ensure_layout().unwrap();
+
+        assert!(paths.root_dir.is_dir());
+        assert!(paths.models_dir.is_dir());
+        assert!(paths.input_dir.is_dir());
+        assert!(paths.outputs_dir.is_dir());
+        assert!(paths.runtime_dir.is_dir());
+        assert!(paths.config_dir.is_dir());
+        assert!(paths.diffuse_runtime_dir.is_dir());
+        assert!(paths.audio_runtime_dir.is_dir());
+        assert_eq!(
+            paths.config_path,
+            paths.runtime_dir.join("config").join("preferences.json")
+        );
+        assert_eq!(
+            paths.secrets_path,
+            paths.runtime_dir.join("config").join("cloud_secrets.json")
+        );
+
+        for relative in APP_LAYOUT_DIRS {
+            let path = app_layout_path(&root, relative);
+            assert!(
+                path.is_dir(),
+                "expected first-run folder {} to exist",
+                path.display()
+            );
+        }
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn test_settings() -> GenerationSettings {
