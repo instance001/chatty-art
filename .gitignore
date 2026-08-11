@@ -2,6 +2,10 @@
 /.vs/
 /dist/
 /release/
+!/release/
+/release/*
+!/release/windows/
+!/release/windows/**
 /runtime/
 /kobold-runtime/
 /vision-parts/
