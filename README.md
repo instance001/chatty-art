@@ -18,6 +18,15 @@ Standalone local media generator, and ChattyCog-compatible module drop-in.
 
 (Drop me in ChattyCog's `modules/` folder!)
 
+## Install
+
+- Windows portable zip: <https://github.com/instance001/chatty-art/releases/download/v0.4/chatty-art-windows-portable-v0.4.zip>
+- Latest releases: <https://github.com/instance001/chatty-art/releases>
+- Windows install guide: <https://instance001.github.io/chatty-art-windows.html>
+- Source code: <https://github.com/instance001/chatty-art>
+
+Download the Windows portable zip, extract it to a normal folder, then double-click `Run Chatty Art.bat`. Chatty-art does not ship model weights; drop local models and required companion runtime files into the folders described below.
+
 ## Storage Layout
 
 Chatty-art stores its runtime data beside the active app root. When running from a source checkout, that root is the repository folder. When running from a packaged executable, it is the executable's folder. Set `CHATTY_ART_BASE_PATH` to force a different portable data folder.
