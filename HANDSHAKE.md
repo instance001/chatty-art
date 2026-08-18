@@ -7,7 +7,7 @@
 
 ## What this module is for
 
-Chatty-art is the local media-generation department. It is where image, GIF, video, and audio jobs are prepared, run, monitored, and reviewed, including reference-guided edits, prompt-assist expansion, LoRA stacking, and output inspection.
+Chatty-art is the local media-generation module. It is where image, GIF, video, and audio jobs are prepared, run, monitored, and reviewed, including reference-guided edits, prompt-assist expansion, LoRA stacking, and output inspection.
 
 ## Inputs this module expects
 
