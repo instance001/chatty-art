@@ -6,6 +6,7 @@ import torchaudio
 import math
 import pyloudnorm as pyln
 import numpy as np
+import soundfile as sf
 from huggingface_hub import hf_hub_download
 import os
 
@@ -91,7 +92,15 @@ class DacInterface:
         return self.convert_audio(audio, sr, self.sr, 1)
     
     def load_audio(self, path):
-        wav, sr = torchaudio.load(path)
+        try:
+            wav, sr = torchaudio.load(path)
+        except (ImportError, OSError):
+            # torchaudio 2.9 delegates decoding to TorchCodec. The available
+            # Windows TorchCodec wheel does not load with every local PyTorch
+            # build (notably ROCm-flavoured installs), but SoundFile reliably
+            # handles the WAV voice references accepted by Chatty-art.
+            samples, sr = sf.read(path, always_2d=True, dtype="float32")
+            wav = torch.from_numpy(samples.T)
         return self.convert_audio_tensor(wav, sr).unsqueeze(0)
     
     def preprocess(self, audio_data):

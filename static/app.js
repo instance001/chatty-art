@@ -6035,6 +6035,13 @@ function areAssignedReferencesCompatible(model) {
     return true;
   }
 
+  if (isSpeechVoiceReferenceModel(model)) {
+    return (!state.primaryReference
+        || (state.primaryReference.kind === "audio" && model.supports_audio_reference))
+      && !state.endReference
+      && !state.controlReference;
+  }
+
   if (model.requires_reference && !state.primaryReference) {
     return false;
   }
@@ -6080,6 +6087,17 @@ function getAssignedReferenceValidationMessage(model) {
 
   if (state.generationStyle !== "realism") {
     return "The selected reference setup is not compatible with the current model.";
+  }
+
+  if (isSpeechVoiceReferenceModel(model)) {
+    if (state.primaryReference
+        && (state.primaryReference.kind !== "audio" || !model.supports_audio_reference)) {
+      return "Voice cloning needs an audio file assigned as the Voice Reference.";
+    }
+    if (state.endReference || state.controlReference) {
+      return "Speech voice cloning only uses the Voice Reference slot. Clear any end-frame or control-video inputs.";
+    }
+    return "The assigned Voice Reference is not compatible with this speech model.";
   }
 
   if (model.requires_reference && !state.primaryReference) {

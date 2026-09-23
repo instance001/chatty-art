@@ -20,7 +20,7 @@ Standalone local media generator, and ChattyCog-compatible module drop-in.
 
 ## Install
 
-- Windows portable zip: <https://github.com/instance001/chatty-art/releases/download/v0.4/chatty-art-windows-portable-v0.4.zip>
+- Windows portable zip: <https://github.com/instance001/chatty-art/releases/download/v0.4.1/chatty-art-windows-portable-v0.4.1.zip>
 - Latest releases: <https://github.com/instance001/chatty-art/releases>
 - Windows install guide: <https://instance001.github.io/chatty-art-windows.html>
 - Source code: <https://github.com/instance001/chatty-art>
@@ -317,8 +317,8 @@ For realism speech models, the Input Tray can also show:
 
 - `Use as Voice Reference`
   Choose an audio clip from either `Input Folder` or `Output Folder`, then assign it as the voice reference.
-  Chatty-art will hand that audio file to `OuteTTS` as the cloning reference for the generated speech.
-  Short `.wav` clips work best.
+  Chatty-art normalizes the selected reference with FFmpeg before handing it to `OuteTTS`, so common audio formats such as WAV, M4A/AAC, and MP3 work when FFmpeg can read them.
+  A short, clear `.wav` clip remains the most predictable first-run path.
   Keep voice-reference clips at `20 seconds or less`, and ideally around `15 seconds or under`.
 
 In `Advanced`, audio models can expand that literal lane into a sequence builder:
@@ -612,7 +612,7 @@ The app opens at `http://127.0.0.1:7878`.
 - The Input Tray now shows both `Input Folder` files and `Output Folder` files so you can reuse generated material without moving it by hand.
 - The Input Tray lets you choose whether the selected file should be used as a `Guide` or treated as the image to `Edit`.
 - For realism speech models, the Input Tray also lets you assign an audio clip as `Voice Reference`.
-- Short `.wav` clips work best for `Voice Reference`, and OuteTTS expects the cloning clip to be `20 seconds or less`.
+- Chatty-art normalizes `Voice Reference` files through FFmpeg before cloning; short, clear `.wav` clips remain the most predictable choice, and OuteTTS expects the clip to be `20 seconds or less`.
 - The dashboard columns can be collapsed with `Hide` and restored from the bottom-right dock as `Controls`, `Outputs`, and `Input Tray`.
 - In realism mode, still-image references can be selected from the tray, including files from `input/` or previously generated output images.
 - Realism audio uses specialist backends alongside the realism visual lane:

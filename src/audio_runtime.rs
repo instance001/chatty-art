@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -7,6 +7,8 @@ use std::{
         Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
+    thread,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -41,6 +43,12 @@ struct RuntimeProbe {
     ready: bool,
     supports_audio_reference: bool,
     note: String,
+}
+
+#[derive(Default)]
+struct RuntimeProbeCache {
+    completed: HashMap<String, RuntimeProbe>,
+    pending: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -253,11 +261,31 @@ fn is_stable_audio_package(model_name: &str, model_path: &Path) -> bool {
 fn probe_outetts_runtime(audio_runtime_dir: &Path) -> RuntimeProbe {
     let cache = outetts_probe_cache();
     let cache_key = audio_runtime_dir.to_string_lossy().to_string();
-    if let Ok(guard) = cache.lock() {
-        if let Some(probe) = guard.get(&cache_key) {
+    if let Ok(mut guard) = cache.lock() {
+        if let Some(probe) = guard.completed.get(&cache_key) {
             return probe.clone();
         }
+
+        if guard.pending.insert(cache_key.clone()) {
+            let runtime_dir = audio_runtime_dir.to_path_buf();
+            thread::spawn(move || {
+                let probe = probe_outetts_runtime_blocking(&runtime_dir);
+                if let Ok(mut cache) = outetts_probe_cache().lock() {
+                    cache.pending.remove(&cache_key);
+                    cache.completed.insert(cache_key, probe);
+                }
+            });
+        }
     }
+
+    RuntimeProbe {
+        ready: false,
+        supports_audio_reference: false,
+        note: "Checking the local OuteTTS speech runtime in the background. Refresh Files in a moment to see whether voice-reference cloning is ready.".to_string(),
+    }
+}
+
+fn probe_outetts_runtime_blocking(audio_runtime_dir: &Path) -> RuntimeProbe {
 
     let source_dir = outetts_source_dir(audio_runtime_dir);
     let runner_path = outetts_runner_path(audio_runtime_dir);
@@ -309,6 +337,8 @@ except Exception:
     pass
 
 required = [
+    "torch",
+    "torchaudio",
     "loguru",
     "polars",
     "ftfy",
@@ -395,10 +425,6 @@ print(json.dumps({
         },
     };
 
-    if let Ok(mut guard) = cache.lock() {
-        guard.insert(cache_key, probe.clone());
-    }
-
     probe
 }
 
@@ -409,13 +435,35 @@ fn probe_stable_audio_runtime(audio_runtime_dir: &Path, package_dir: &Path) -> R
         audio_runtime_dir.to_string_lossy(),
         package_dir.to_string_lossy()
     );
-    if let Ok(guard) = cache.lock() {
-        if let Some(probe) = guard.get(&cache_key)
-            && probe.ready
-        {
+    if let Ok(mut guard) = cache.lock() {
+        if let Some(probe) = guard.completed.get(&cache_key) {
             return probe.clone();
         }
+
+        if guard.pending.insert(cache_key.clone()) {
+            let runtime_dir = audio_runtime_dir.to_path_buf();
+            let package_dir = package_dir.to_path_buf();
+            thread::spawn(move || {
+                let probe = probe_stable_audio_runtime_blocking(&runtime_dir, &package_dir);
+                if let Ok(mut cache) = stable_audio_probe_cache().lock() {
+                    cache.pending.remove(&cache_key);
+                    cache.completed.insert(cache_key, probe);
+                }
+            });
+        }
     }
+
+    RuntimeProbe {
+        ready: false,
+        supports_audio_reference: false,
+        note: "Checking the local Stable Audio runtime in the background. Refresh Files in a moment to see whether sound generation is ready.".to_string(),
+    }
+}
+
+fn probe_stable_audio_runtime_blocking(
+    audio_runtime_dir: &Path,
+    package_dir: &Path,
+) -> RuntimeProbe {
 
     let source_dir = stable_audio_source_dir(audio_runtime_dir);
     let runner_path = stable_audio_runner_path(audio_runtime_dir);
@@ -543,14 +591,6 @@ print(json.dumps({
         },
     };
 
-    if let Ok(mut guard) = cache.lock() {
-        if probe.ready {
-            guard.insert(cache_key, probe.clone());
-        } else {
-            guard.remove(&cache_key);
-        }
-    }
-
     probe
 }
 
@@ -597,11 +637,13 @@ async fn generate_with_outetts(
         )
     })?;
 
-    let speaker_audio_path = reference_asset
-        .map(|asset| asset.disk_path(input_dir, outputs_dir))
-        .map(|path| path.to_string_lossy().to_string());
     let segments = build_outetts_segments(request);
     let request_dir = temp_audio_request_dir("outetts", &model.slug, used_seed)?;
+    let speaker_audio_path = reference_asset
+        .map(|asset| asset.disk_path(input_dir, outputs_dir))
+        .map(|path| normalize_outetts_reference_audio(&path, &request_dir))
+        .transpose()?
+        .map(|path| path.to_string_lossy().to_string());
     let mut rendered_segments = Vec::new();
 
     for (index, segment) in segments.iter().enumerate() {
@@ -1305,6 +1347,8 @@ except Exception:
     pass
 
 required = [
+    "torch",
+    "torchaudio",
     "loguru",
     "polars",
     "ftfy",
@@ -1443,14 +1487,46 @@ fn parse_runtime_probe(output: &str) -> Option<RuntimeProbe> {
     serde_json::from_str::<RuntimeProbe>(output.trim()).ok()
 }
 
-fn outetts_probe_cache() -> &'static Mutex<HashMap<String, RuntimeProbe>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, RuntimeProbe>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn outetts_probe_cache() -> &'static Mutex<RuntimeProbeCache> {
+    static CACHE: OnceLock<Mutex<RuntimeProbeCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RuntimeProbeCache::default()))
 }
 
-fn stable_audio_probe_cache() -> &'static Mutex<HashMap<String, RuntimeProbe>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, RuntimeProbe>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn normalize_outetts_reference_audio(source_path: &Path, request_dir: &Path) -> Result<PathBuf> {
+    let normalized_path = request_dir.join("voice-reference.wav");
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-i",
+            &source_path.to_string_lossy(),
+            "-map",
+            "0:a:0",
+            "-ac",
+            "1",
+            "-ar",
+            "24000",
+            "-c:a",
+            "pcm_s16le",
+            &normalized_path.to_string_lossy(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .context("failed to launch FFmpeg for the OuteTTS voice reference")?;
+
+    if !output.status.success() || !normalized_path.exists() {
+        bail!(
+            "Could not normalize the voice reference '{}' into a WAV file. FFmpeg stderr: {}",
+            source_path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(normalized_path)
+}
+
+fn stable_audio_probe_cache() -> &'static Mutex<RuntimeProbeCache> {
+    static CACHE: OnceLock<Mutex<RuntimeProbeCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RuntimeProbeCache::default()))
 }
 
 fn run_python_sync_with_interpreter<I, S>(interpreter: &Path, args: I) -> Result<String>
@@ -1463,11 +1539,44 @@ where
         .map(|value| value.as_ref().to_string())
         .collect::<Vec<_>>();
 
-    let output = Command::new(interpreter)
+    let mut child = Command::new(interpreter)
         .args(args.iter())
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("failed to start the requested Python interpreter")?;
+
+    // OuteTTS can take a while to cold-import torch and its audio stack on slower
+    // Windows hardware. This only runs in a background readiness probe, so give
+    // it a generous startup window while still guaranteeing it cannot hang.
+    let timeout = Duration::from_secs(120);
+    let started = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .context("failed while waiting for the requested Python interpreter")?
+            .is_some()
+        {
+            break;
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .context("failed to collect the timed-out Python interpreter output")?;
+            bail!(
+                "The local Python runtime probe timed out after {} seconds. Stderr: {}",
+                timeout.as_secs(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to collect the requested Python interpreter output")?;
 
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());

@@ -1206,14 +1206,14 @@ Good beginner example with cloning:
 - `Words / Script`
   `The local generation run is complete.`
 - `Voice Reference`
-  `short prerecorded WAV voice clip from the tray`
+  `short prerecorded voice clip from the tray`
 
 Simple advice:
 
 - Put the exact spoken sentence in `Words / Script`
 - Put voice, tone, speed, mood, and delivery notes in `Prompt`
 - Put the speaker you want copied in `Voice Reference`
-- Use a short `.wav` clip when possible
+- Chatty-art normalizes the selected voice reference with FFmpeg; WAV, M4A/AAC, and MP3 work when FFmpeg can read them, while a short, clear `.wav` clip remains the most predictable choice
 - Keep the cloning clip at `20 seconds or less`, and ideally around `15 seconds or under`
 - Use `Negative Prompt` for things like robotic delivery, harsh sibilance, mumbling, noisy background, or clipping
 
@@ -1675,7 +1675,7 @@ Important:
 - `Expressive` mode can use the selected file as a guide or edit/source cue during planning.
 - `Realism` mode uses tray-selected still images for guide/edit workflows, including files from `input/` and previously generated output images.
 - `Realism` speech models like `OuteTTS` can use tray-selected audio files as a `Voice Reference`.
-- Short `.wav` clips work best for `Voice Reference`, and OuteTTS expects the cloning clip to be `20 seconds or less`.
+- Chatty-art normalizes `Voice Reference` files with FFmpeg before cloning. A short, clear `.wav` clip remains the most predictable choice, and OuteTTS expects the cloning clip to be `20 seconds or less`.
 - Some realism video families can also use:
   - `Set as End Frame`
   - `Use as Control Video`
