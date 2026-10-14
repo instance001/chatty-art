@@ -32,3 +32,9 @@ GitHub API licence field at inventory time: `AGPL-3.0`. This is a metadata obser
 ## Evidence and limitations
 
 Evidence: authenticated GitHub API metadata captured by the FMI provenance audit. Contribution, prior art, ownership, contributors, document licensing, relationships, releases, and publication status require human verification.
+
+## Evidence-led lineage position
+
+The README and source tree support an `IMPLEMENTED` local media-generation application and optional ChattyCog module. Its documented combination is a portable app-root layout, locally supplied models/runtimes, Rust backend with browser dashboard and progress reporting, reference-media selection/edit paths, explicit output storage, and optional host-mediated module use. It identifies `llama.cpp`, `stable-diffusion.cpp`, and bundled/third-party audio/runtime material as dependencies or included components; FMI does not claim those upstream technologies.
+
+Chatty-art and Chatty-lora are documented sister tools. Their integration is via approved, copy-only artifacts through ChattyCog bridge lanes, not shared internal state. This record does not claim ownership of image, video, audio, diffusion, prompt assistance, LoRA, or media-generation techniques.
